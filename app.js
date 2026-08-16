@@ -45,11 +45,13 @@
       flyOutMode: "last",
       payFreq: "fortnightly",
       payRef: ymd(today),
-      weekStart: 1
+      weekStart: 1,
+      theme: "default"
     };
   }
 
   var settings = loadSettings();
+  applySharedSettingsFromURL();
   var view = { year: new Date().getFullYear(), month: new Date().getMonth() };
 
   function loadSettings() {
@@ -64,6 +66,175 @@
   }
   function saveSettings() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
+  }
+
+  // ---------- Share: settings <-> URL ----------
+  var SHARE_KEYS = ["workerName","daysOn","daysOff","startDate","rotation",
+                    "splitCount","altFirst","flyOutMode","payFreq","payRef","weekStart","theme"];
+
+  function buildShareURL() {
+    var payload = {};
+    SHARE_KEYS.forEach(function (k) { payload[k] = settings[k]; });
+    var encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))))
+      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return location.origin + location.pathname + "#r=" + encoded;
+  }
+
+  function applySharedSettingsFromURL() {
+    var m = location.hash.match(/[#&]r=([A-Za-z0-9_-]+)/);
+    if (!m) return;
+    try {
+      var b64 = m[1].replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      var payload = JSON.parse(decodeURIComponent(escape(atob(b64))));
+      SHARE_KEYS.forEach(function (k) {
+        if (payload[k] !== undefined && payload[k] !== null) settings[k] = payload[k];
+      });
+      settings.daysOn = Math.max(1, +settings.daysOn || 7);
+      settings.daysOff = Math.max(1, +settings.daysOff || 7);
+      settings.weekStart = +settings.weekStart === 0 ? 0 : 1;
+      saveSettings();
+      // Clean the hash so refreshes don't keep re-importing
+      history.replaceState(null, "", location.pathname + location.search);
+      setTimeout(function () { showToast("Shared roster loaded ✔"); }, 300);
+    } catch (e) { /* bad link — ignore */ }
+  }
+
+  // ---------- Toast ----------
+  var toastTimer = null;
+  function showToast(msg) {
+    var t = $("toast");
+    t.textContent = msg;
+    t.hidden = false;
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.hidden = true; }, 2600);
+  }
+
+  // ---------- Share actions ----------
+  function shareRoster() {
+    var url = buildShareURL();
+    var title = "FIFO Roster" + (settings.workerName ? " — " + settings.workerName : "");
+    var text = settings.daysOn + "/" + settings.daysOff + " roster — open the link to see the calendar";
+    if (navigator.share) {
+      navigator.share({ title: title, text: text, url: url }).catch(function () { /* cancelled */ });
+    } else {
+      copyShareLink();
+    }
+  }
+
+  function copyShareLink() {
+    var url = buildShareURL();
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(
+        function () { showToast("Share link copied ✔"); },
+        function () { fallbackCopy(url); }
+      );
+    } else {
+      fallbackCopy(url);
+    }
+  }
+  function fallbackCopy(text) {
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); showToast("Share link copied ✔"); }
+    catch (e) { prompt("Copy this link:", text); }
+    document.body.removeChild(ta);
+  }
+
+  // ---------- .ics export (next 12 months) ----------
+  function icsDate(d) {
+    return d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
+  }
+  function exportICS() {
+    var today = new Date();
+    var from = new Date(today.getFullYear(), today.getMonth(), 1);
+    var to = addDays(from, 366);
+    var who = settings.workerName ? settings.workerName + " " : "";
+    var lines = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//FIFO Roster Calendar//EN",
+      "CALSCALE:GREGORIAN",
+      "X-WR-CALNAME:" + (who ? who + "FIFO Roster" : "FIFO Roster")
+    ];
+    var stamp = icsDate(today) + "T000000Z";
+    var d = new Date(from);
+    var blockStart = null, blockKey = null, blockLabel = null, uid = 0;
+
+    function labelFor(st, date) {
+      if (st.key === "flyin") return "🛬 FLY IN — swing starts";
+      if (st.key === "flyout") return "🛫 FLY OUT — heading home";
+      if (st.key === "day") return "☀ Day shift";
+      if (st.key === "night") return "🌙 Night shift";
+      return "🏠 Home / R&R";
+    }
+    function flush(endExclusive) {
+      if (!blockStart) return;
+      uid++;
+      lines.push(
+        "BEGIN:VEVENT",
+        "UID:fifo-" + stamp + "-" + uid + "@fifo-roster",
+        "DTSTAMP:" + stamp,
+        "DTSTART;VALUE=DATE:" + icsDate(blockStart),
+        "DTEND;VALUE=DATE:" + icsDate(endExclusive),
+        "SUMMARY:" + who + blockLabel,
+        "TRANSP:TRANSPARENT",
+        "END:VEVENT"
+      );
+    }
+
+    while (d < to) {
+      var st = getStatus(d);
+      var pay = isPayDay(d);
+      var key = st.key;
+      if (key !== blockKey) {
+        flush(d);
+        blockStart = new Date(d);
+        blockKey = key;
+        blockLabel = labelFor(st, d);
+      }
+      if (pay) {
+        uid++;
+        lines.push(
+          "BEGIN:VEVENT",
+          "UID:fifo-pay-" + stamp + "-" + uid + "@fifo-roster",
+          "DTSTAMP:" + stamp,
+          "DTSTART;VALUE=DATE:" + icsDate(d),
+          "DTEND;VALUE=DATE:" + icsDate(addDays(d, 1)),
+          "SUMMARY:💰 PAY DAY",
+          "TRANSP:TRANSPARENT",
+          "END:VEVENT"
+        );
+      }
+      d = addDays(d, 1);
+    }
+    flush(d);
+    lines.push("END:VCALENDAR");
+
+    var blob = new Blob([lines.join("\r\n")], { type: "text/calendar;charset=utf-8" });
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "fifo-roster.ics";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () {
+      URL.revokeObjectURL(a.href);
+      document.body.removeChild(a);
+    }, 500);
+    showToast("Calendar file downloaded ✔");
+  }
+
+  // ---------- Theme ----------
+  function applyTheme() {
+    if (settings.theme && settings.theme !== "default") {
+      document.body.setAttribute("data-theme", settings.theme);
+    } else {
+      document.body.removeAttribute("data-theme");
+    }
   }
 
   // ---------- Roster engine ----------
@@ -289,6 +460,8 @@
     $("payFreq").value = settings.payFreq;
     $("payRef").value = settings.payRef;
     $("weekStart").value = String(settings.weekStart);
+    $("theme").value = settings.theme || "default";
+    applyTheme();
     updateConditionalFields();
   }
 
@@ -346,6 +519,13 @@
       if (this.value) { settings.payRef = this.value; render(); }
     });
     $("weekStart").addEventListener("change", function () { settings.weekStart = +this.value; render(); });
+    $("theme").addEventListener("change", function () {
+      settings.theme = this.value; applyTheme(); render();
+    });
+
+    $("shareBtn").addEventListener("click", shareRoster);
+    $("copyLinkBtn").addEventListener("click", copyShareLink);
+    $("icsBtn").addEventListener("click", exportICS);
 
     $("prevMonth").addEventListener("click", function () { shiftMonth(-1); });
     $("nextMonth").addEventListener("click", function () { shiftMonth(1); });

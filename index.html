@@ -119,6 +119,23 @@
           <option value="0">Sunday</option>
         </select>
       </label>
+      <label class="field">
+        <span>Theme</span>
+        <select id="theme">
+          <option value="default">Sky (default)</option>
+          <option value="coal">Coal</option>
+          <option value="gold">Gold</option>
+          <option value="underground">Underground mining</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Share roster</h2>
+      <button class="btn btn-small" id="shareBtn">📤 Share roster link</button>
+      <button class="btn btn-small" id="copyLinkBtn">🔗 Copy share link</button>
+      <button class="btn btn-small" id="icsBtn">📅 Export to phone calendar (.ics)</button>
+      <p class="hint" style="margin-top:8px">The link carries your full roster setup — anyone who opens it sees your exact calendar. The .ics file imports into Google / Apple / Outlook calendars (next 12 months).</p>
     </div>
 
     <button class="btn btn-primary" id="printBtn">🖨 Print this month</button>
@@ -160,6 +177,8 @@
     </footer>
   </main>
 </div>
+
+<div class="toast no-print" id="toast" hidden></div>
 
 <script src="app.js"></script>
 </body>
