@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FIFO Roster Calendar</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- ============ SETTINGS SIDEBAR ============ -->
+  <aside class="sidebar no-print" id="sidebar">
+    <div class="brand">
+      <span class="brand-icon">✈</span>
+      <div>
+        <h1>FIFO Roster</h1>
+        <p>Rolling calendar planner</p>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Worker</h2>
+      <label class="field">
+        <span>Name / crew (shows on printout)</span>
+        <input type="text" id="workerName" placeholder="e.g. Cam — B Crew" />
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Roster pattern</h2>
+      <label class="field">
+        <span>Preset</span>
+        <select id="preset">
+          <option value="7,7">7 / 7</option>
+          <option value="8,6">8 / 6</option>
+          <option value="14,14">14 / 14</option>
+          <option value="14,7">14 / 7</option>
+          <option value="21,7">21 / 7</option>
+          <option value="2w,2w">2 weeks / 2 weeks</option>
+          <option value="custom">Custom…</option>
+        </select>
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span>Days on site</span>
+          <input type="number" id="daysOn" min="1" max="90" value="7" />
+        </label>
+        <label class="field">
+          <span>Days at home</span>
+          <input type="number" id="daysOff" min="1" max="90" value="7" />
+        </label>
+      </div>
+      <label class="field">
+        <span>First fly-in day (start of a swing)</span>
+        <input type="date" id="startDate" />
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Day / night rotation</h2>
+      <label class="field">
+        <span>Shift pattern</span>
+        <select id="rotation">
+          <option value="days">Day shifts only</option>
+          <option value="nights">Night shifts only</option>
+          <option value="split-dn">Days then nights (within each swing)</option>
+          <option value="split-nd">Nights then days (within each swing)</option>
+          <option value="alt">Alternate swings (day swing / night swing)</option>
+        </select>
+      </label>
+      <label class="field" id="splitField" hidden>
+        <span>Shifts before switching over</span>
+        <input type="number" id="splitCount" min="1" max="89" value="4" />
+      </label>
+      <label class="field" id="altField" hidden>
+        <span>First swing is…</span>
+        <select id="altFirst">
+          <option value="day">Day shift swing</option>
+          <option value="night">Night shift swing</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Fly days</h2>
+      <label class="field">
+        <span>Fly-out day</span>
+        <select id="flyOutMode">
+          <option value="last">Last rostered day on site</option>
+          <option value="after">Day after last shift (1st R&amp;R day)</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Pay days</h2>
+      <label class="field">
+        <span>Pay frequency</span>
+        <select id="payFreq">
+          <option value="none">Don't show pay days</option>
+          <option value="weekly">Weekly</option>
+          <option value="fortnightly" selected>Fortnightly</option>
+          <option value="monthly">Monthly (same date each month)</option>
+        </select>
+      </label>
+      <label class="field" id="payRefField">
+        <span>A known pay day</span>
+        <input type="date" id="payRef" />
+      </label>
+    </div>
+
+    <div class="panel">
+      <h2>Calendar options</h2>
+      <label class="field">
+        <span>Week starts on</span>
+        <select id="weekStart">
+          <option value="1">Monday</option>
+          <option value="0">Sunday</option>
+        </select>
+      </label>
+    </div>
+
+    <button class="btn btn-primary" id="printBtn">🖨 Print this month</button>
+    <button class="btn btn-ghost" id="resetBtn">Reset settings</button>
+    <p class="hint">Settings save automatically in your browser. Tip: use landscape when printing.</p>
+  </aside>
+
+  <!-- ============ CALENDAR ============ -->
+  <main class="main">
+    <header class="cal-header">
+      <div class="month-nav no-print">
+        <button class="nav-btn" id="prevYear" title="Previous year">«</button>
+        <button class="nav-btn" id="prevMonth" title="Previous month">‹</button>
+        <button class="nav-btn today-btn" id="todayBtn">Today</button>
+        <button class="nav-btn" id="nextMonth" title="Next month">›</button>
+        <button class="nav-btn" id="nextYear" title="Next year">»</button>
+      </div>
+      <div class="cal-title">
+        <h2 id="monthTitle">Month</h2>
+        <p id="printSubtitle" class="print-subtitle"></p>
+      </div>
+      <div class="swing-summary" id="swingSummary"></div>
+    </header>
+
+    <div class="legend" id="legend">
+      <span class="lg"><i class="sw sw-flyin"></i> Fly in</span>
+      <span class="lg"><i class="sw sw-day"></i> Day shift</span>
+      <span class="lg"><i class="sw sw-night"></i> Night shift</span>
+      <span class="lg"><i class="sw sw-flyout"></i> Fly out</span>
+      <span class="lg"><i class="sw sw-home"></i> Home / R&amp;R</span>
+      <span class="lg"><i class="sw sw-pay"></i> Pay day</span>
+    </div>
+
+    <div class="calendar" id="calendar"></div>
+
+    <footer class="cal-footer">
+      <span id="footerPattern"></span>
+      <span class="no-print">Rolling roster — browse any month, past or future.</span>
+    </footer>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

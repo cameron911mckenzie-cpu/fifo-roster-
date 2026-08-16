@@ -1,0 +1,329 @@
+/* ============================================================
+   FIFO Roster Calendar
+   ============================================================ */
+:root {
+  --bg: #0f172a;
+  --panel: #1e293b;
+  --panel-2: #16213b;
+  --line: #2c3a55;
+  --text: #e5edf8;
+  --muted: #94a6c3;
+  --accent: #38bdf8;
+
+  --c-flyin: #0ea5e9;
+  --c-flyin-bg: #e0f2fe;
+  --c-day: #f59e0b;
+  --c-day-bg: #fef3c7;
+  --c-night: #6366f1;
+  --c-night-bg: #e0e7ff;
+  --c-flyout: #14b8a6;
+  --c-flyout-bg: #ccfbf1;
+  --c-home: #22c55e;
+  --c-home-bg: #dcfce7;
+  --c-pay: #ec4899;
+
+  --cell-ink: #1e293b;
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+.app { display: flex; min-height: 100vh; }
+
+/* ---------------- Sidebar ---------------- */
+.sidebar {
+  width: 300px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 18px 16px 32px;
+  overflow-y: auto;
+  max-height: 100vh;
+  position: sticky;
+  top: 0;
+}
+.brand { display: flex; gap: 10px; align-items: center; margin-bottom: 16px; }
+.brand-icon {
+  font-size: 26px; background: var(--accent); color: #062035;
+  width: 44px; height: 44px; border-radius: 12px;
+  display: flex; align-items: center; justify-content: center;
+}
+.brand h1 { font-size: 18px; margin: 0; }
+.brand p { margin: 0; font-size: 12px; color: var(--muted); }
+
+.panel {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+.panel h2 {
+  margin: 0 0 10px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+.field { display: block; margin-bottom: 10px; }
+.field:last-child { margin-bottom: 0; }
+.field span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+.field-row { display: flex; gap: 8px; }
+.field-row .field { flex: 1; }
+
+input, select {
+  width: 100%;
+  padding: 8px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: #0b1428;
+  color: var(--text);
+  font-size: 14px;
+  font-family: inherit;
+}
+input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+input[type="date"] { color-scheme: dark; }
+
+.btn {
+  width: 100%;
+  padding: 11px;
+  border-radius: 10px;
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-top: 4px;
+  font-family: inherit;
+}
+.btn-primary { background: var(--accent); color: #062035; }
+.btn-primary:hover { filter: brightness(1.1); }
+.btn-ghost { background: transparent; color: var(--muted); border: 1px solid var(--line); }
+.btn-ghost:hover { color: var(--text); }
+.hint { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+
+/* ---------------- Main / header ---------------- */
+.main {
+  flex: 1;
+  padding: 18px 22px 30px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.cal-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.month-nav { display: flex; gap: 6px; }
+.nav-btn {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--text);
+  border-radius: 8px;
+  min-width: 38px;
+  height: 38px;
+  font-size: 16px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.nav-btn:hover { border-color: var(--accent); color: var(--accent); }
+.today-btn { padding: 0 12px; font-size: 13px; font-weight: 600; }
+
+.cal-title h2 { margin: 0; font-size: 26px; }
+.print-subtitle { margin: 2px 0 0; font-size: 13px; color: var(--muted); }
+
+.swing-summary {
+  margin-left: auto;
+  font-size: 13px;
+  color: var(--muted);
+  text-align: right;
+  line-height: 1.5;
+}
+.swing-summary b { color: var(--text); }
+
+/* ---------------- Legend ---------------- */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-bottom: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+.lg { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
+.sw-flyin  { background: var(--c-flyin); }
+.sw-day    { background: var(--c-day); }
+.sw-night  { background: var(--c-night); }
+.sw-flyout { background: var(--c-flyout); }
+.sw-home   { background: var(--c-home); }
+.sw-pay    { background: var(--c-pay); border-radius: 50%; }
+
+/* ---------------- Calendar grid ---------------- */
+.calendar {
+  flex: 1;
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  grid-auto-rows: minmax(96px, 1fr);
+  gap: 5px;
+}
+.dow {
+  grid-row: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: var(--panel);
+  border-radius: 8px;
+  min-height: 30px;
+}
+.calendar { grid-template-rows: 34px; }
+
+.cell {
+  border-radius: 10px;
+  padding: 6px 7px;
+  background: #f8fafc;
+  color: var(--cell-ink);
+  border: 1.5px solid transparent;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  position: relative;
+  overflow: hidden;
+}
+.cell.other-month { opacity: 0.35; }
+.cell.today { outline: 3px solid var(--accent); outline-offset: -1px; }
+
+.cell .date-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.cell .date-num { font-weight: 700; font-size: 14px; }
+.cell .icon { font-size: 15px; line-height: 1; }
+
+.cell .tag {
+  font-size: 10.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 999px;
+  align-self: flex-start;
+  color: #fff;
+}
+.cell .sub {
+  font-size: 10px;
+  color: #475569;
+  line-height: 1.3;
+}
+
+/* Status colours */
+.cell.st-flyin  { background: var(--c-flyin-bg);  border-color: var(--c-flyin); }
+.cell.st-flyin .tag { background: var(--c-flyin); }
+.cell.st-day    { background: var(--c-day-bg);    border-color: var(--c-day); }
+.cell.st-day .tag { background: var(--c-day); }
+.cell.st-night  { background: var(--c-night-bg);  border-color: var(--c-night); }
+.cell.st-night .tag { background: var(--c-night); }
+.cell.st-flyout { background: var(--c-flyout-bg); border-color: var(--c-flyout); }
+.cell.st-flyout .tag { background: var(--c-flyout); }
+.cell.st-home   { background: var(--c-home-bg);   border-color: var(--c-home); }
+.cell.st-home .tag { background: var(--c-home); }
+
+/* Pay day marker */
+.cell.payday::after {
+  content: "$ PAY";
+  position: absolute;
+  bottom: 5px;
+  right: 6px;
+  background: var(--c-pay);
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 999px;
+  letter-spacing: 0.05em;
+}
+
+/* ---------------- Footer ---------------- */
+.cal-footer {
+  margin-top: 12px;
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* ---------------- Responsive ---------------- */
+@media (max-width: 860px) {
+  .app { flex-direction: column; }
+  .sidebar { width: 100%; max-height: none; position: static; }
+  .calendar { grid-auto-rows: minmax(74px, auto); }
+  .swing-summary { margin-left: 0; text-align: left; }
+}
+
+/* ============================================================
+   PRINT — one month per page, landscape friendly
+   ============================================================ */
+@media print {
+  @page { size: A4 landscape; margin: 8mm; }
+
+  body { background: #fff; color: #000; }
+  .no-print { display: none !important; }
+  .app { display: block; }
+  .main { padding: 0; }
+
+  .cal-header { margin-bottom: 4mm; }
+  .cal-title h2 { font-size: 22pt; color: #000; }
+  .print-subtitle { color: #333; font-size: 10pt; }
+  .swing-summary { color: #333; font-size: 9pt; }
+  .swing-summary b { color: #000; }
+
+  .legend { color: #000; font-size: 9pt; margin-bottom: 3mm; }
+
+  .calendar {
+    gap: 1.2mm;
+    grid-auto-rows: minmax(24mm, auto);
+    grid-template-rows: 8mm;
+  }
+  .dow {
+    background: #eee;
+    color: #000;
+    border: 0.4pt solid #999;
+    border-radius: 2px;
+    min-height: 0;
+  }
+  .cell {
+    border-radius: 3px;
+    border-width: 1pt;
+    background: #fff !important;
+    print-color-adjust: exact;
+    -webkit-print-color-adjust: exact;
+    border: 0.6pt solid #bbb;
+    page-break-inside: avoid;
+  }
+  .cell.st-flyin  { background: var(--c-flyin-bg) !important;  border: 1pt solid var(--c-flyin); }
+  .cell.st-day    { background: var(--c-day-bg) !important;    border: 1pt solid var(--c-day); }
+  .cell.st-night  { background: var(--c-night-bg) !important;  border: 1pt solid var(--c-night); }
+  .cell.st-flyout { background: var(--c-flyout-bg) !important; border: 1pt solid var(--c-flyout); }
+  .cell.st-home   { background: var(--c-home-bg) !important;   border: 1pt solid var(--c-home); }
+  .cell .tag { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .cell.payday::after { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+  .cell.other-month { opacity: 0.3; }
+  .cell.today { outline: none; }
+
+  .cal-footer { color: #333; font-size: 8pt; margin-top: 2mm; }
+}
