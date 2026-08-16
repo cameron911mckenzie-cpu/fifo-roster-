@@ -111,10 +111,15 @@
   }
 
   // ---------- Share actions ----------
+  function appURL() {
+    return location.origin + location.pathname;
+  }
+
   function shareRoster() {
     var url = buildShareURL();
     var title = "FIFO Roster" + (settings.workerName ? " — " + settings.workerName : "");
-    var text = settings.daysOn + "/" + settings.daysOff + " roster — open the link to see the calendar";
+    var text = "My " + settings.daysOn + "/" + settings.daysOff +
+      " FIFO roster — open the link to see my fly days, site days and days home";
     if (navigator.share) {
       navigator.share({ title: title, text: text, url: url }).catch(function () { /* cancelled */ });
     } else {
@@ -124,9 +129,27 @@
 
   function copyShareLink() {
     var url = buildShareURL();
+    copyText(url, "My roster link copied ✔");
+  }
+
+  function shareApp() {
+    var url = appURL();
+    var text = "FIFO Roster Calendar — free rolling roster planner. Set your swing (7/7, 8/6, 14/14 or custom), it marks fly days, site days, days home and pay days.";
+    if (navigator.share) {
+      navigator.share({ title: "FIFO Roster Calendar", text: text, url: url }).catch(function () { /* cancelled */ });
+    } else {
+      copyAppLink();
+    }
+  }
+
+  function copyAppLink() {
+    copyText(appURL(), "App link copied ✔ (no roster details)");
+  }
+
+  function copyText(url, okMsg) {
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(url).then(
-        function () { showToast("Share link copied ✔"); },
+        function () { showToast(okMsg); },
         function () { fallbackCopy(url); }
       );
     } else {
@@ -526,6 +549,8 @@
     $("shareBtn").addEventListener("click", shareRoster);
     $("copyLinkBtn").addEventListener("click", copyShareLink);
     $("icsBtn").addEventListener("click", exportICS);
+    $("shareAppBtn").addEventListener("click", shareApp);
+    $("copyAppLinkBtn").addEventListener("click", copyAppLink);
 
     $("prevMonth").addEventListener("click", function () { shiftMonth(-1); });
     $("nextMonth").addEventListener("click", function () { shiftMonth(1); });
