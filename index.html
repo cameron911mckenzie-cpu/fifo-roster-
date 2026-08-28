@@ -58,6 +58,10 @@
     <symbol id="i-sliders" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
       <path d="M4 7h10M18 7h2M4 17h4M12 17h8" /><circle cx="16" cy="7" r="2" /><circle cx="10" cy="17" r="2" />
     </symbol>
+    <symbol id="i-calendar" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round">
+      <rect x="3.5" y="5" width="17" height="15.5" rx="2" />
+      <path d="M3.5 9.8h17M8 3v4M16 3v4" />
+    </symbol>
   </svg>
 
   <div class="hazard-bar" aria-hidden="true"></div>
@@ -98,8 +102,8 @@
         <button class="ghost-button" id="icsBtn" title="Download 12 months of swings as a calendar file">
           <svg class="icon"><use href="#i-download" /></svg><span class="btn-label">Export</span>
         </button>
-        <button class="ghost-button" id="printBtn" title="Print the current view">
-          <svg class="icon"><use href="#i-print" /></svg><span class="btn-label">Print</span>
+        <button class="ghost-button" id="printBtn" title="Print the calendar view you are looking at">
+          <svg class="icon"><use href="#i-print" /></svg><span class="btn-label">Print view</span>
         </button>
       </div>
     </header>
@@ -228,6 +232,9 @@
             <button class="nav-button" id="nextBtn" aria-label="Next"><svg class="icon"><use href="#i-chev-right" /></svg></button>
           </div>
           <div class="view-right">
+            <button class="ghost-button" id="printMonthBtn" title="Print a clean one-page roster sheet for this month">
+              <svg class="icon"><use href="#i-calendar" /></svg><span class="btn-label">Print month</span>
+            </button>
             <div class="segmented view-switch" id="viewSwitch" role="group" aria-label="Calendar view">
               <button type="button" data-view="month">Month</button>
               <button type="button" data-view="quarter">3 months</button>
@@ -286,6 +293,50 @@
       </div>
     </div>
   </aside>
+
+  <div class="sheet-backdrop" id="sheetBackdrop" hidden></div>
+  <section class="sheet-modal" id="sheetModal" hidden aria-label="Print month sheet">
+    <header class="sheet-modal-head">
+      <div>
+        <p class="view-kicker">Print sheet</p>
+        <h3 id="sheetModalTitle">—</h3>
+      </div>
+      <button class="icon-button" id="sheetClose" aria-label="Close"><svg class="icon"><use href="#i-close" /></svg></button>
+    </header>
+
+    <div class="sheet-options">
+      <label class="field compact">
+        <span>Paper</span>
+        <select id="sheetPaper">
+          <option value="a4">A4</option>
+          <option value="letter">US Letter</option>
+        </select>
+      </label>
+      <label class="field compact">
+        <span>Layout</span>
+        <select id="sheetOrientation">
+          <option value="portrait">Portrait</option>
+          <option value="landscape">Landscape</option>
+        </select>
+      </label>
+      <label class="check-row"><input type="checkbox" id="sheetNotes" checked /><span>Day notes</span></label>
+      <label class="check-row"><input type="checkbox" id="sheetSwings" checked /><span>Swing table</span></label>
+      <label class="check-row"><input type="checkbox" id="sheetLegend" checked /><span>Legend</span></label>
+      <label class="check-row"><input type="checkbox" id="sheetColour" checked /><span>Colour</span></label>
+    </div>
+
+    <div class="sheet-scroll" id="sheetScroll">
+      <div class="print-sheet" id="printSheet"></div>
+    </div>
+
+    <footer class="sheet-modal-foot">
+      <span class="hint" id="sheetHint">—</span>
+      <div class="sheet-actions">
+        <button class="ghost-button" id="sheetCancel">Close</button>
+        <button class="primary-button" id="sheetPrintBtn"><svg class="icon"><use href="#i-print" /></svg>Print</button>
+      </div>
+    </footer>
+  </section>
 
   <div class="toast-stack" id="toastStack" aria-live="polite"></div>
 

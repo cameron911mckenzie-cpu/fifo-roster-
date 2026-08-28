@@ -26,6 +26,7 @@ It is a static site: no build step, no framework, no account, no server. Everyth
 - **Month** view with status, day-of-swing, shift, fly markers, pay markers and notes on every cell
 - **3-month** view for planning leave and trips
 - **Year** view: twelve months at a glance with an onsite/home count per month — click any month to drill in
+- **Print month**: a clean, print-ready one-page sheet for the current month (see below)
 - Header countdowns: today's status, next fly-in, next R&R, next pay day
 - Per-period stats: days onsite, days home, home share, swings, travel days, pay days
 - Swing table underneath: every swing touching the view, with fly-in, fly-out, shift, R&R length and pay days inside it
@@ -35,16 +36,24 @@ It is a static site: no build step, no framework, no account, no server. Everyth
 - Click any day for the full picture: swing number, day N of M, cycle position, fly-in/fly-out dates, when you are back onsite, and whether it is a pay day
 - Per-day notes (flight numbers, medico, camp, handover) saved in the browser and shown on the grid
 
+**Print month**
+
+- Opens a WYSIWYG **print sheet** for the month you are looking at — a clean, light, one-page roster: month heading, the grid with status, day-of-swing, shift, `FLY IN` / `FLY OUT` / `PAY` tags and your notes, a summary strip (days onsite, days home, home share, swings, pay days), a swing table and a legend
+- Options before you commit to paper: **A4 or US Letter**, **portrait or landscape**, day notes on/off, swing table on/off, legend on/off, and **colour or greyscale** (greyscale is there for laser printers and cheap copying)
+- The preview is scaled to fit the screen, and printing injects the matching `@page` rule so the paper size and orientation follow your choice
+- The grid stretches to fill the page whether the month needs 4, 5 or 6 rows
+- `Esc` or **Close** dismisses it; the browser's own `Ctrl/Cmd + P` still prints the on-screen calendar view instead
+
 **Sharing and export**
 
 - Copy a **share link** — the whole roster is encoded in the URL, and the address bar always reflects your current setup
 - **Export .ics** — 12 months of swings, fly-in/fly-out reminders and pay days as all-day calendar events, ready for Google Calendar, Outlook or Apple Calendar
-- **Print** — the print stylesheet drops the controls and prints the calendar light-on-dark-free for the fridge or the crib room
+- **Print view** — the print stylesheet drops the controls and prints the calendar you are looking at
 
 **Practical touches**
 
 - Monday or Sunday week start
-- Keyboard shortcuts: `←` `→` move, `T` today, `M` / `3` / `Y` switch view, `Esc` close
+- Keyboard shortcuts: `←` `→` move, `T` today, `M` / `3` / `Y` switch view, `Esc` close the day drawer or print sheet
 - Saved automatically to this browser's local storage; nothing is uploaded anywhere
 - Works on a phone: settings collapse into a slide-out panel and the grid stays readable
 

@@ -776,6 +776,193 @@
     toast("Calendar file downloaded — 12 months of swings");
   }
 
+  /* ---------------------------------------------------------- print sheet */
+
+  function sheetOptions() {
+    return {
+      paper: $("sheetPaper").value,
+      orientation: $("sheetOrientation").value,
+      notes: $("sheetNotes").checked,
+      swings: $("sheetSwings").checked,
+      legend: $("sheetLegend").checked,
+      colour: $("sheetColour").checked
+    };
+  }
+
+  function sheetSize(options) {
+    var landscape = options.orientation === "landscape";
+    var letter = options.paper === "letter";
+    return {
+      width: letter ? (landscape ? "279mm" : "216mm") : (landscape ? "297mm" : "210mm"),
+      height: letter ? (landscape ? "216mm" : "279mm") : (landscape ? "210mm" : "297mm")
+    };
+  }
+
+  function buildPrintSheet() {
+    var pat = pattern();
+    var pay = payConfig();
+    var options = sheetOptions();
+    var cursor = R.fromISO(state.cursor);
+    var monthStart = R.startOfMonth(cursor);
+    var monthEnd = R.endOfMonth(cursor);
+    var gridStart = R.startOfWeek(monthStart, Number(state.weekStart));
+    var gridEnd = R.addDays(R.startOfWeek(monthEnd, Number(state.weekStart)), 6);
+    var days = R.range(gridStart, gridEnd);
+    var today = R.today();
+    var stats = R.summarise(pat, pay, monthStart, monthEnd);
+
+    var cells = days.map(function (date) {
+      var day = R.describeDay(pat, date);
+      var inMonth = date.getMonth() === cursor.getMonth();
+      var isPay = R.paydaysInRange(pay, date, date).length > 0;
+      var note = state.notes[day.iso];
+      var cls = ["ps-day"];
+      if (!inMonth) cls.push("ps-outside");
+      else cls.push(day.onsite ? "ps-onsite" : "ps-home");
+      if (inMonth && day.isFlyIn) cls.push("ps-fly-in");
+      if (inMonth && day.isFlyOut) cls.push("ps-fly-out");
+      if (isPay) cls.push("ps-pay");
+      if (R.isSameDay(date, today)) cls.push("ps-today");
+
+      var status = "";
+      var meta = "";
+      var flags = "";
+      if (inMonth) {
+        status = statusText(day);
+        meta = day.onsite
+          ? "Day " + day.dayOfSwing + " of " + day.daysInSwing + " · " + (day.shift === "night" ? "Nights" : "Days")
+          : "R&R day " + day.dayOfBreak + " of " + day.daysOfBreak;
+        if (day.isFlyIn) flags += '<span class="ps-flag fly">Fly in</span>';
+        if (day.isFlyOut) flags += '<span class="ps-flag fly">' + (day.onsite ? "Fly out" : "Home") + "</span>";
+      }
+      if (isPay) flags += '<span class="ps-flag pay">Pay</span>';
+
+      return '<div class="' + cls.join(" ") + '">' +
+        '<span class="ps-num">' + date.getDate() + "</span>" +
+        (status ? '<span class="ps-status">' + status + "</span>" : "") +
+        (meta ? '<span class="ps-meta-line">' + meta + "</span>" : "") +
+        (flags ? '<span class="ps-flags">' + flags + "</span>" : "") +
+        (options.notes && note ? '<span class="ps-note">' + escapeHtml(note) + "</span>" : "") +
+        "</div>";
+    }).join("");
+
+    var swings = R.swingsInRange(pat, monthStart, monthEnd);
+    var swingRows = swings.map(function (swing) {
+      var payDays = R.paydaysInRange(pay, swing.flyIn, swing.breakEnds);
+      return "<tr><td>#" + swing.number + "</td>" +
+        "<td>" + R.shortDateLabel(swing.flyIn) + "</td>" +
+        "<td>" + R.shortDateLabel(swing.flyOut) + "</td>" +
+        "<td>" + swing.days + "</td>" +
+        "<td>" + (swing.shift === "night" ? "Nights" : "Days") + "</td>" +
+        "<td>" + payDays.length + "</td></tr>";
+    }).join("");
+
+    var sheet = $("printSheet");
+    sheet.classList.toggle("no-colour", !options.colour);
+    sheet.innerHTML =
+      '<div class="ps-head">' +
+        '<div class="ps-brand">' +
+          '<span class="ps-brand-mark"><svg class="icon"><use href="#i-helmet" /></svg></span>' +
+          '<div><div class="ps-eyebrow">FIFO roster planner</div><div class="ps-wordmark">SWING</div></div>' +
+        "</div>" +
+        '<div class="ps-title">' +
+          '<div class="ps-month">' + R.MONTHS[cursor.getMonth()] + " " + cursor.getFullYear() + "</div>" +
+          '<div class="ps-sub">' + state.onsite + " days on / " + state.off + " days off · " +
+            (state.onsite + state.off) + "-day cycle</div>" +
+        "</div>" +
+      "</div>" +
+      '<div class="ps-meta">' +
+        "<span>Anchor <b>" + R.shortDateLabel(R.fromISO(state.anchor)) + "</b></span>" +
+        "<span>Shift <b>" + (state.shift === "rotate" ? "Rotating" : state.shift === "night" ? "Nights" : "Days") + "</b></span>" +
+        "<span>Pay <b>" + R.payLabel(pay) + " from " + R.shortDateLabel(R.fromISO(state.payAnchor)) + "</b></span>" +
+      "</div>" +
+      '<div class="ps-week">' + R.weekdayInitials(Number(state.weekStart)).map(function (initial) {
+        return "<span>" + initial + "</span>";
+      }).join("") + "</div>" +
+      '<div class="ps-grid" style="grid-template-rows: repeat(' + (days.length / 7) + ', minmax(0, 1fr))">' +
+        cells + "</div>" +
+      '<div class="ps-summary">' +
+        "<div><b>" + stats.onsite + "</b><span>Days onsite</span></div>" +
+        "<div><b>" + stats.home + "</b><span>Days home</span></div>" +
+        "<div><b>" + stats.homePercent + "%</b><span>Home share</span></div>" +
+        "<div><b>" + stats.swings + "</b><span>Swings</span></div>" +
+        "<div><b>" + stats.paydays + "</b><span>Pay days</span></div>" +
+      "</div>" +
+      (options.swings && swings.length
+        ? '<div class="ps-swings"><h4>Swings in ' + R.MONTHS[cursor.getMonth()] + "</h4><table>" +
+            "<thead><tr><th>Swing</th><th>Fly in</th><th>Fly out</th><th>Days on</th><th>Shift</th><th>Pay days</th></tr></thead>" +
+            "<tbody>" + swingRows + "</tbody></table></div>"
+        : "") +
+      '<div class="ps-foot">' +
+        (options.legend
+          ? '<div class="ps-legend">' +
+              '<span><i style="background:var(--p-onsite)"></i>Onsite</span>' +
+              '<span><i style="background:var(--p-home)"></i>Home</span>' +
+              '<span><i style="background:var(--p-fly)"></i>Fly in / out</span>' +
+              '<span><i style="background:var(--p-pay)"></i>Pay day</span>' +
+            "</div>"
+          : "<span></span>") +
+        "<span>Generated " + R.shortDateLabel(today) + " · confirm against your official roster</span>" +
+      "</div>";
+  }
+
+  function fitPrintSheet() {
+    var sheet = $("printSheet");
+    var scroll = $("sheetScroll");
+    if (!sheet || !scroll || $("sheetModal").hidden) return;
+    var options = sheetOptions();
+    var size = sheetSize(options);
+    sheet.style.width = size.width;
+    sheet.style.minHeight = size.height;
+    sheet.style.zoom = "";
+    var natural = sheet.getBoundingClientRect().width;
+    var available = scroll.clientWidth - 32;
+    sheet.style.zoom = natural ? Math.min(1, available / natural).toFixed(3) : 1;
+    $("sheetHint").textContent = (options.paper === "letter" ? "US Letter" : "A4") + " · " +
+      options.orientation + " · " + R.monthLabel(R.fromISO(state.cursor));
+  }
+
+  function openPrintSheet() {
+    $("sheetModalTitle").textContent = R.monthLabel(R.fromISO(state.cursor));
+    $("sheetModal").hidden = false;
+    $("sheetBackdrop").hidden = false;
+    buildPrintSheet();
+    fitPrintSheet();
+  }
+
+  function closePrintSheet() {
+    $("sheetModal").hidden = true;
+    $("sheetBackdrop").hidden = true;
+  }
+
+  function refreshPrintSheet() {
+    if ($("sheetModal").hidden) return;
+    buildPrintSheet();
+    fitPrintSheet();
+  }
+
+  function printPrintSheet() {
+    var options = sheetOptions();
+    var rule = "@page { size: " + (options.paper === "letter" ? "letter" : "A4") + " " +
+      options.orientation + "; margin: 12mm; }";
+    var tag = $("sheetPageStyle");
+    if (!tag) {
+      tag = document.createElement("style");
+      tag.id = "sheetPageStyle";
+      document.head.appendChild(tag);
+    }
+    tag.textContent = rule;
+    document.body.classList.add("sheet-printing");
+    var clear = function () {
+      document.body.classList.remove("sheet-printing");
+      window.removeEventListener("afterprint", clear);
+      clearTimeout(fallback);
+    };
+    var fallback = setTimeout(clear, 2000);   // some browsers never fire afterprint
+    window.addEventListener("afterprint", clear);
+    window.print();
+  }
+
   /* ---------------------------------------------------------------- share */
 
   function shareURL() {
@@ -911,6 +1098,16 @@
     $("icsBtn").addEventListener("click", downloadICS);
     $("printBtn").addEventListener("click", function () { window.print(); });
 
+    $("printMonthBtn").addEventListener("click", openPrintSheet);
+    $("sheetClose").addEventListener("click", closePrintSheet);
+    $("sheetCancel").addEventListener("click", closePrintSheet);
+    $("sheetBackdrop").addEventListener("click", closePrintSheet);
+    $("sheetPrintBtn").addEventListener("click", printPrintSheet);
+    ["sheetPaper", "sheetOrientation", "sheetNotes", "sheetSwings", "sheetLegend", "sheetColour"]
+      .forEach(function (id) {
+        $(id).addEventListener("change", refreshPrintSheet);
+      });
+
     $("resetBtn").addEventListener("click", function () {
       if (!window.confirm("Reset the roster, pay settings and notes back to defaults?")) return;
       state = defaults();
@@ -930,7 +1127,11 @@
       if (tag === "input" || tag === "textarea" || tag === "select") return;
       if (event.key === "ArrowLeft") moveCursor(state.view === "year" ? -12 : state.view === "quarter" ? -3 : -1);
       else if (event.key === "ArrowRight") moveCursor(state.view === "year" ? 12 : state.view === "quarter" ? 3 : 1);
-      else if (event.key === "Escape") { if (selectedISO) closeDrawer(); else if ($("sidebar").classList.contains("open")) $("sidebar").classList.remove("open"); }
+      else if (event.key === "Escape") {
+        if (!$("sheetModal").hidden) closePrintSheet();
+        else if (selectedISO) closeDrawer();
+        else if ($("sidebar").classList.contains("open")) $("sidebar").classList.remove("open");
+      }
       else if (event.key.toLowerCase() === "t") $("todayBtn").click();
       else if (event.key.toLowerCase() === "m") setView("month");
       else if (event.key.toLowerCase() === "y") setView("year");
@@ -941,6 +1142,7 @@
 
     window.addEventListener("resize", function () {
       if (window.innerWidth > 1000) $("sidebar").classList.remove("open");
+      fitPrintSheet();
     });
   }
 
