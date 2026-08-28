@@ -1,545 +1,1161 @@
 /*
- * Gold Scout
- * A deliberately small, dependency-light field planning interface.
- * Live map layers are supplied by Queensland Government services; the target
- * signal is a transparent planning model and must not be treated as a find.
+ * SWING · FIFO Roster Planner
+ *
+ * app.js wires the sidebar controls, the calendar views, the day drawer and
+ * the export / share actions on top of the pure maths in roster.js.
+ *
+ * The whole app state is a single plain object: it is persisted to
+ * localStorage, encoded into the URL for sharing, and re-rendered from
+ * scratch on every change. There is no framework and no build step.
  */
 (function () {
   "use strict";
 
-  var STORAGE_KEY = "gold-scout-state-v1";
-  var DEFAULT_AREA = "charters";
-  var LOCATIONS = [
-    { id: "charters", name: "Charters Towers Goldfield", short: "Charters Towers", meta: "20.07° S, 146.27° E", coords: [-20.073, 146.263], zoom: 11 },
-    { id: "clermont", name: "Clermont goldfields", short: "Clermont", meta: "22.83° S, 147.63° E", coords: [-22.825, 147.635], zoom: 11 },
-    { id: "ravenswood", name: "Ravenswood district", short: "Ravenswood", meta: "20.10° S, 146.89° E", coords: [-20.101, 146.891], zoom: 11 },
-    { id: "mount-morgan", name: "Mount Morgan district", short: "Mount Morgan", meta: "23.65° S, 150.39° E", coords: [-23.645, 150.389], zoom: 11 },
-    { id: "gympie", name: "Gympie goldfield", short: "Gympie", meta: "26.19° S, 152.66° E", coords: [-26.189, 152.665], zoom: 11 },
-    { id: "warwick", name: "Southern Downs", short: "Warwick", meta: "28.22° S, 152.03° E", coords: [-28.219, 152.034], zoom: 11 }
-  ];
+  var R = window.Roster;
+  var STORE_KEY = "swing-roster-v1";
 
-  var state = loadState();
-  var map = null;
-  var baseLayers = {};
-  var overlayLayers = {};
-  var signalLayer = null;
-  var inspectionMarker = null;
-  var currentLocation = getLocation(state.areaId);
-  var activeTarget = null;
-  var customPoint = null;
-  var toastTimer = null;
+  /* ---------------------------------------------------------------- state */
+
+  function defaults() {
+    var today = R.today();
+    var monday = R.addDays(today, -R.mod(today.getDay() - 1, 7));
+    return {
+      preset: "8-6",
+      onsite: 8,
+      off: 6,
+      anchor: R.toISO(monday),               // day 1 of a swing
+      shift: "day",                          // day | night | rotate
+      flyOutAsHome: false,
+      payFreq: "fortnightly",
+      payAnchor: R.toISO(R.addDays(monday, -14)),
+      payEvery: 28,
+      payAmount: null,
+      weekStart: 1,                          // 1 = Monday, 0 = Sunday
+      showNotes: true,
+      showPay: true,
+      showOutside: true,
+      view: "month",                         // month | quarter | year
+      cursor: R.toISO(R.startOfMonth(today)),
+      notes: {}
+    };
+  }
+
+  var state = defaults();
+  var selectedISO = null;
+  var dayCache = {};   // iso -> describeDay, rebuilt per render
+  var payCache = {};   // iso -> true
+
+  function pattern() {
+    return R.normalisePattern({
+      id: state.preset,
+      onsite: state.onsite,
+      off: state.off,
+      anchor: state.anchor,
+      shift: state.shift,
+      flyOutAsHome: state.flyOutAsHome
+    });
+  }
+
+  function payConfig() {
+    return R.normalisePay({
+      freq: state.payFreq,
+      anchor: state.payAnchor,
+      every: state.payEvery,
+      amount: state.payAmount
+    });
+  }
+
+  function setState(patch) {
+    Object.keys(patch).forEach(function (key) { state[key] = patch[key]; });
+    save();
+    render();
+  }
+
+  /* ----------------------------------------------------------- persistence */
+
+  function save() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch (e) { /* private mode */ }
+    var query = toQuery();
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, "", query ? "?" + query : window.location.pathname);
+    }
+  }
+
+  function load() {
+    var stored = null;
+    try { stored = JSON.parse(localStorage.getItem(STORE_KEY) || "null"); } catch (e) { stored = null; }
+    if (stored && typeof stored === "object") {
+      Object.keys(defaults()).forEach(function (key) {
+        if (stored[key] !== undefined && stored[key] !== null) state[key] = stored[key];
+      });
+    }
+    applyQuery(window.location.search);
+    // keep the calendar on the month containing the anchor when it is closed
+    state.cursor = /^\d{4}-\d{2}-\d{2}$/.test(state.cursor) ? state.cursor : R.toISO(R.startOfMonth(R.today()));
+  }
+
+  function toQuery() {
+    var parts = [];
+    parts.push("r=" + state.onsite + "-" + state.off);
+    parts.push("a=" + state.anchor);
+    if (state.shift !== "day") parts.push("s=" + state.shift);
+    if (state.flyOutAsHome) parts.push("t=h");
+    if (state.payFreq !== "fortnightly") parts.push("pf=" + state.payFreq);
+    parts.push("pa=" + state.payAnchor);
+    if (state.payFreq === "custom") parts.push("pe=" + state.payEvery);
+    if (state.payAmount !== null && state.payAmount !== "") parts.push("am=" + state.payAmount);
+    if (Number(state.weekStart) !== 1) parts.push("w=0");
+    if (state.view !== "month") parts.push("v=" + state.view);
+    return parts.join("&");
+  }
+
+  function applyQuery(search) {
+    if (!search) return false;
+    var q = new URLSearchParams(search);
+    if (!q.toString()) return false;
+    var r = (q.get("r") || "").split("-");
+    if (r.length === 2) {
+      state.onsite = R.clampInt(r[0], 1, 120, state.onsite);
+      state.off = R.clampInt(r[1], 1, 120, state.off);
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(q.get("a") || "")) state.anchor = q.get("a");
+    if (/^\d{4}-\d{2}-\d{2}$/.test(q.get("pa") || "")) state.payAnchor = q.get("pa");
+    if (["day", "night", "rotate"].indexOf(q.get("s")) >= 0) state.shift = q.get("s");
+    state.flyOutAsHome = q.get("t") === "h";
+    if (q.get("pf")) state.payFreq = q.get("pf");
+    if (q.get("pe")) state.payEvery = R.clampInt(q.get("pe"), 1, 365, 28);
+    if (q.get("am") !== null) state.payAmount = parseFloat(q.get("am")) || null;
+    if (q.get("w") !== null) state.weekStart = q.get("w") === "0" ? 0 : 1;
+    if (["month", "quarter", "year"].indexOf(q.get("v")) >= 0) state.view = q.get("v");
+    syncPresetFromNumbers();
+    return true;
+  }
+
+  function syncPresetFromNumbers() {
+    var match = R.PRESETS.filter(function (p) {
+      return p.id !== "custom" && p.onsite === state.onsite && p.off === state.off;
+    })[0];
+    state.preset = match ? match.id : "custom";
+  }
+
+  /* ---------------------------------------------------------------- utils */
 
   function $(id) { return document.getElementById(id); }
-  function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
-  function getLocation(id) { return LOCATIONS.find(function (item) { return item.id === id; }) || LOCATIONS[0]; }
-  function loadState() {
-    var fallback = { areaId: DEFAULT_AREA, style: "satellite", saved: [], weights: { fault: 40, drainage: 35, gold: 25 } };
-    try {
-      var raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return fallback;
-      var value = JSON.parse(raw);
-      return {
-        areaId: value.areaId || DEFAULT_AREA,
-        style: value.style || "satellite",
-        saved: Array.isArray(value.saved) ? value.saved : [],
-        weights: Object.assign(fallback.weights, value.weights || {})
-      };
-    } catch (error) { return fallback; }
+
+  function escapeHtml(text) {
+    return String(text == null ? "" : text)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
-  function saveState() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (error) { /* private mode */ }
+
+  function money(value) {
+    var n = Number(value);
+    if (!isFinite(n)) return "—";
+    return "$" + n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function countdown(days) {
+    if (days === 0) return "Today";
+    if (days === 1) return "Tomorrow";
+    return "in " + days + " days";
+  }
+
+  function countdownShort(days) {
+    if (days === 0) return "Today";
+    if (days === 1) return "1 day";
+    return days + " days";
+  }
+
+  var toastTimer = null;
+  function toast(message) {
+    var stack = $("toastStack");
+    var node = document.createElement("div");
+    node.className = "toast";
+    node.textContent = message;
+    stack.appendChild(node);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () {
+      node.remove();
+    }, 2800);
+  }
+
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text);
+    }
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        var ok = document.execCommand("copy");
+        ta.remove();
+        ok ? resolve() : reject(new Error("copy failed"));
+      } catch (e) {
+        ta.remove();
+        reject(e);
+      }
+    });
+  }
+
+  /* --------------------------------------------------------- day metadata */
+
+  function buildCaches(start, end) {
+    dayCache = {};
+    payCache = {};
+    var pat = pattern();
+    R.range(start, end).forEach(function (date) {
+      dayCache[R.toISO(date)] = R.describeDay(pat, date);
+    });
+    R.paydaysInRange(payConfig(), start, end).forEach(function (date) {
+      payCache[R.toISO(date)] = true;
+    });
+  }
+
+  function infoFor(date) {
+    return dayCache[R.toISO(date)] || R.describeDay(pattern(), date);
+  }
+
+  function isPayDay(date) { return payCache[R.toISO(date)] === true; }
+
+  function visibleRange() {
+    var cursor = R.fromISO(state.cursor);
+    if (state.view === "year") {
+      return { start: new Date(cursor.getFullYear(), 0, 1), end: new Date(cursor.getFullYear(), 11, 31) };
+    }
+    if (state.view === "quarter") {
+      return { start: R.startOfMonth(cursor), end: R.endOfMonth(R.addMonths(cursor, 2)) };
+    }
+    var monthStart = R.startOfMonth(cursor);
+    return {
+      start: state.showOutside ? R.startOfWeek(monthStart, state.weekStart) : monthStart,
+      end: state.showOutside ? R.addDays(R.startOfWeek(R.endOfMonth(cursor), state.weekStart), 6) : R.endOfMonth(cursor)
+    };
+  }
+
+  function statusText(day) {
+    if (day.isFlyIn) return "Fly in";
+    if (day.isFlyOut) return day.onsite ? "Fly out" : "Travel home";
+    return day.onsite ? "Onsite" : "Home";
+  }
+
+  // Swings are numbered from the anchor date, so browsing back past it
+  // produces zero and negative numbers. Label those honestly.
+  function swingLabel(number) {
+    return number >= 1 ? "#" + number : "before anchor";
+  }
+
+  function positionText(day) {
+    return day.onsite
+      ? "Day " + day.dayOfSwing + " of " + day.daysInSwing
+      : "R&R day " + day.dayOfBreak + " of " + day.daysOfBreak;
+  }
+
+  function dayTitle(day) {
+    var lines = [
+      R.longDateLabel(day.date),
+      statusText(day) + " · " + positionText(day),
+      "Swing " + day.swing + " · " + (day.shift === "night" ? "Night shift" : "Day shift")
+    ];
+    if (isPayDay(day.date)) lines.push("Pay day");
+    if (state.notes[day.iso]) lines.push("Note: " + state.notes[day.iso]);
+    return lines.join("\n");
+  }
+
+  /* -------------------------------------------------------------- render */
+
+  function render() {
+    syncControls();
+    var range = visibleRange();
+    buildCaches(range.start, range.end);
+    renderPills();
+    renderTitle(range);
+    renderCalendar(range);
+    renderStats(range);
+    renderSwings(range);
+  }
+
+  function renderPills() {
+    var today = R.today();
+    var pat = pattern();
+    var pay = payConfig();
+    var day = R.describeDay(pat, today);
+
+    var todayPill = $("todayPill");
+    todayPill.className = "status-pill status-today " + (day.onsite ? "is-onsite" : "is-home");
+    if (day.isFlyIn || day.isFlyOut) todayPill.classList.add("is-travel");
+    var sub = day.onsite ? (day.swing >= 1 ? "Swing " + day.swing : "Pre-anchor") : "R&R day " + day.dayOfBreak;
+    $("todayStatus").innerHTML = statusText(day) + ' <em>· ' + sub + "</em>";
+    todayPill.title = R.longDateLabel(today) + " — " + positionText(day);
+
+    var nextIn = R.nextFlyIn(pat, today, true);
+    var daysToFlyIn = R.diffDays(today, nextIn);
+    var flyPill = $("flyInPill");
+    flyPill.className = "status-pill is-travel";
+    flyPill.title = "Next fly-in " + R.longDateLabel(nextIn);
+    $("nextFlyIn").innerHTML = daysToFlyIn === 0
+      ? 'Today <em>· fly in</em>'
+      : countdownShort(daysToFlyIn) + ' <em>· ' + R.shortDateLabel(nextIn) + "</em>";
+
+    var homeDate = day.onsite ? findNextHome(pat, today) : today;
+    var daysToHome = R.diffDays(today, homeDate);
+    var homePill = $("homePill");
+    homePill.className = "status-pill is-home";
+    homePill.title = "Home from " + R.longDateLabel(homeDate);
+    $("nextHome").innerHTML = day.onsite
+      ? countdownShort(daysToHome) + ' <em>· ' + R.shortDateLabel(homeDate) + "</em>"
+      : 'Now <em>· day ' + day.dayOfBreak + " of " + day.daysOfBreak + "</em>";
+
+    var payDate = R.nextPayday(pay, today, true);
+    var payPill = $("payPill");
+    payPill.className = "status-pill is-pay";
+    payPill.title = payDate ? "Pay day " + R.longDateLabel(payDate) + " — " + R.payLabel(pay) : "No pay day found";
+    $("nextPay").innerHTML = payDate
+      ? (R.diffDays(today, payDate) === 0
+        ? 'Today <em>· ' + (state.payAmount ? money(state.payAmount) : "pay day") + "</em>"
+        : countdownShort(R.diffDays(today, payDate)) + ' <em>· ' + R.shortDateLabel(payDate) + "</em>")
+      : "—";
+  }
+
+  function findNextHome(pat, from) {
+    var cursor = from;
+    for (var i = 0; i < 200; i++) {
+      cursor = R.addDays(cursor, 1);
+      if (!R.describeDay(pat, cursor).onsite) return cursor;
+    }
+    return from;
+  }
+
+  function renderTitle(range) {
+    var cursor = R.fromISO(state.cursor);
+    var title = "";
+    var kicker = "";
+    if (state.view === "year") {
+      title = String(cursor.getFullYear());
+      kicker = "Continuous cycle · " + state.onsite + " on / " + state.off + " off · anchored " + R.shortDateLabel(R.fromISO(state.anchor));
+    } else if (state.view === "quarter") {
+      title = R.MONTHS_SHORT[cursor.getMonth()] + " – " + R.MONTHS_SHORT[R.addMonths(cursor, 2).getMonth()] + " " + cursor.getFullYear();
+      kicker = "3 months in pattern";
+    } else {
+      title = R.monthLabel(cursor);
+      kicker = "Cycle " + state.onsite + " + " + state.off + " = " + (state.onsite + state.off) + " days · anchor " + R.shortDateLabel(R.fromISO(state.anchor));
+    }
+    $("viewTitle").textContent = title;
+    $("viewKicker").textContent = kicker;
+  }
+
+  /* ------------------------------------------------------------ calendar */
+
+  function renderCalendar(range) {
+    var host = $("calendar");
+    if (state.view === "year") host.innerHTML = yearView(range);
+    else if (state.view === "quarter") host.innerHTML = quarterView(range);
+    else host.innerHTML = monthView(range);
+  }
+
+  function weekHeadHTML(extraClass) {
+    return '<div class="week-head ' + (extraClass || "") + '">' +
+      R.weekdayInitials(Number(state.weekStart)).map(function (d, i) {
+        var weekend = R.mod(Number(state.weekStart) + i, 7) % 6 === 0;
+        return '<span class="' + (weekend ? "is-weekend" : "") + '">' + d + "</span>";
+      }).join("") + "</div>";
+  }
+
+  function badgesHTML(day, compact) {
+    var out = "";
+    if (day.isFlyIn) out += '<span class="badge badge-fly"><svg class="icon"><use href="#i-plane" /></svg></span>';
+    if (day.isFlyOut) out += '<span class="badge badge-fly out"><svg class="icon"><use href="#i-plane" /></svg></span>';
+    if (state.showPay && isPayDay(day.date)) out += '<span class="badge badge-pay"><svg class="icon"><use href="#i-pay" /></svg></span>';
+    if (state.showNotes && state.notes[day.iso]) out += '<span class="badge badge-note"><svg class="icon"><use href="#i-note" /></svg></span>';
+    if (!compact && R.isSameDay(day.date, R.today())) out += '<span class="badge badge-today">TODAY</span>';
+    return out;
+  }
+
+  function dayClasses(day, inMonth) {
+    var cls = ["day", "day-" + day.type];
+    if (day.isFlyIn) cls.push("is-fly-in");
+    if (day.isFlyOut) cls.push("is-fly-out");
+    if (day.isWeekend) cls.push("is-weekend");
+    if (!inMonth) cls.push("is-outside");
+    if (R.isSameDay(day.date, R.today())) cls.push("is-today");
+    if (selectedISO === day.iso) cls.push("is-selected");
+    return cls.join(" ");
+  }
+
+  function monthView(range) {
+    var cursor = R.fromISO(state.cursor);
+    var monthStart = R.startOfMonth(cursor);
+    var gridStart = R.startOfWeek(monthStart, Number(state.weekStart));
+    var gridEnd = R.addDays(R.startOfWeek(R.endOfMonth(cursor), Number(state.weekStart)), 6);
+    var cells = R.range(gridStart, gridEnd).map(function (date) {
+      var day = infoFor(date);
+      var inMonth = date.getMonth() === cursor.getMonth();
+      if (!inMonth && !state.showOutside) {
+        return '<div class="day is-outside" style="visibility:hidden"></div>';
+      }
+      var note = state.notes[day.iso];
+      return '<button type="button" class="' + dayClasses(day, inMonth) + '" data-iso="' + day.iso + '" title="' + escapeHtml(dayTitle(day)) + '">' +
+        '<span class="day-top"><span class="day-num">' + date.getDate() + "</span>" +
+        '<span class="day-badges">' + badgesHTML(day) + "</span></span>" +
+        '<span class="day-status">' + statusText(day) + "</span>" +
+        '<span class="day-meta">' + positionText(day) +
+          (day.onsite ? ' · <span class="day-shift ' + (day.shift === "night" ? "night" : "") + '">' + (day.shift === "night" ? "Night" : "Day") + "</span>" : "") +
+        "</span>" +
+        (state.showNotes && note ? '<span class="day-note">' + escapeHtml(note) + "</span>" : "") +
+        "</button>";
+    }).join("");
+    return weekHeadHTML() + '<div class="month-grid">' + cells + "</div>";
+  }
+
+  function quarterView(range) {
+    var cursor = R.fromISO(state.cursor);
+    var months = [];
+    for (var i = 0; i < 3; i++) {
+      var m = R.addMonths(cursor, i);
+      months.push(quarterMonthHTML(m));
+    }
+    return '<div class="quarter-wrap">' + months.join("") + "</div>";
+  }
+
+  function quarterMonthHTML(monthDate) {
+    var start = R.startOfWeek(R.startOfMonth(monthDate), Number(state.weekStart));
+    var end = R.addDays(R.startOfWeek(R.endOfMonth(monthDate), Number(state.weekStart)), 6);
+    var cells = R.range(start, end).map(function (date) {
+      var day = infoFor(date);
+      var inMonth = date.getMonth() === monthDate.getMonth();
+      if (!inMonth && !state.showOutside) return '<span class="mini-cell is-outside" style="visibility:hidden"></span>';
+      var cls = ["mini-cell", "day-" + day.type];
+      if (day.isFlyIn) cls.push("is-fly-in");
+      if (day.isFlyOut) cls.push("is-fly-out");
+      if (!inMonth) cls.push("is-outside");
+      if (R.isSameDay(day.date, R.today())) cls.push("is-today");
+      var marks = "";
+      if (day.isFlyIn) marks += '<svg class="mini-plane"><use href="#i-plane" /></svg>';
+      if (state.showNotes && state.notes[day.iso]) marks += '<i class="mini-dot note"></i>';
+      if (state.showPay && isPayDay(day.date)) marks += '<i class="mini-dot"></i>';
+      return '<button type="button" class="' + cls.join(" ") + '" data-iso="' + day.iso + '" title="' + escapeHtml(dayTitle(day)) + '">' +
+        date.getDate() + marks + "</button>";
+    }).join("");
+    return '<div class="quarter-month"><h4>' + R.MONTHS[monthDate.getMonth()] + " <em>" + monthDate.getFullYear() + "</em></h4>" +
+      '<div class="quarter-grid">' + cells + "</div></div>";
+  }
+
+  function yearView(range) {
+    var year = R.fromISO(state.cursor).getFullYear();
+    var today = R.today();
+    var months = [];
+    for (var m = 0; m < 12; m++) {
+      var monthDate = new Date(year, m, 1);
+      var start = R.startOfWeek(monthDate, Number(state.weekStart));
+      var end = R.addDays(R.startOfWeek(R.endOfMonth(monthDate), Number(state.weekStart)), 6);
+      var onsite = 0, home = 0;
+      var cells = R.range(start, end).map(function (date) {
+        var day = infoFor(date);
+        var inMonth = date.getMonth() === m;
+        if (inMonth) { day.onsite ? onsite++ : home++; }
+        if (!inMonth) return '<span class="mini-cell is-outside" style="visibility:hidden"></span>';
+        var cls = ["mini-cell", "day-" + day.type];
+        if (day.isFlyIn) cls.push("is-fly-in");
+        if (day.isFlyOut) cls.push("is-fly-out");
+        if (R.isSameDay(day.date, today)) cls.push("is-today");
+        var marks = "";
+        if (day.isFlyIn) marks += '<svg class="mini-plane"><use href="#i-plane" /></svg>';
+        if (state.showNotes && state.notes[day.iso]) marks += '<i class="mini-dot note"></i>';
+        if (state.showPay && isPayDay(day.date)) marks += '<i class="mini-dot"></i>';
+        return '<button type="button" class="' + cls.join(" ") + '" data-iso="' + day.iso + '" title="' + escapeHtml(dayTitle(day)) + '">' +
+          date.getDate() + marks + "</button>";
+      }).join("");
+      var isCurrent = today.getFullYear() === year && today.getMonth() === m;
+      months.push(
+        '<div class="year-month' + (isCurrent ? " is-current" : "") + '">' +
+          "<header><h4 data-jump=\"" + R.toISO(monthDate) + '">' + R.MONTHS[m] + "</h4>" +
+          '<span class="year-stat">' + onsite + " on · " + home + " off</span></header>" +
+          '<div class="quarter-grid">' + cells + "</div></div>"
+      );
+    }
+    return '<div class="year-wrap">' + months.join("") + "</div>";
+  }
+
+  /* --------------------------------------------------------------- stats */
+
+  function renderStats(range) {
+    var pat = pattern();
+    var stats = R.summarise(pat, payConfig(), range.start, range.end);
+    var nextPay = R.nextPayday(payConfig(), R.today(), true);
+    var scope = state.view === "year"
+      ? "in " + R.fromISO(state.cursor).getFullYear()
+      : state.view === "quarter" ? "in view" : "this month";
+
+    var cards = [
+      { cls: "onsite", label: "Days onsite", value: stats.onsite, sub: "swing days " + scope },
+      { cls: "home", label: "Days home", value: stats.home, sub: "R&R days " + scope },
+      {
+        cls: "home", label: "Home share",
+        value: stats.homePercent + "<small>%</small>",
+        sub: "pattern average " + R.homePercent(pat) + "%"
+      },
+      { cls: "onsite", label: "Swings", value: stats.swings, sub: stats.swings === 1 ? "1 swing starting" : stats.swings + " swings starting" },
+      { cls: "travel", label: "Travel days", value: stats.flights, sub: "fly-in and fly-out days" },
+      {
+        cls: "pay", label: "Pay days",
+        value: stats.paydays,
+        sub: nextPay ? "next " + R.shortDateLabel(nextPay) : R.payLabel(payConfig())
+      }
+    ];
+
+    $("statGrid").innerHTML = cards.map(function (card) {
+      return '<div class="stat-card ' + card.cls + '">' +
+        '<div class="stat-label">' + card.label + "</div>" +
+        '<div class="stat-value">' + card.value + "</div>" +
+        '<div class="stat-sub">' + escapeHtml(card.sub) + "</div>" +
+        "</div>";
+    }).join("");
+  }
+
+  /* -------------------------------------------------------------- swings */
+
+  function renderSwings(range) {
+    var pat = pattern();
+    var today = R.today();
+    var swings = R.swingsInRange(pat, range.start, range.end);
+    var body = $("swingsBody");
+
+    $("swingsTitle").textContent = state.view === "year"
+      ? "Swings in " + R.fromISO(state.cursor).getFullYear()
+      : state.view === "quarter" ? "Swings in view" : "Swings touching " + R.monthLabel(R.fromISO(state.cursor));
+    $("swingsCount").textContent = swings.length + (swings.length === 1 ? " swing" : " swings");
+
+    if (!swings.length) {
+      body.innerHTML = '<tr><td colspan="7" style="color:var(--muted-2)">No swings in this range.</td></tr>';
+      return;
+    }
+
+    body.innerHTML = swings.map(function (swing) {
+      var payDays = R.paydaysInRange(payConfig(), swing.flyIn, swing.breakEnds);
+      var isNow = R.diffDays(swing.flyIn, today) >= 0 && R.diffDays(today, swing.breakEnds) >= 0;
+      var daysAway = R.diffDays(today, swing.flyIn);
+      return '<tr class="' + (isNow ? "is-now" : "") + '">' +
+        '<td><span class="swing-num">' + swingLabel(swing.number) + "</span>" +
+          (isNow ? ' <span class="chip chip-now">Now</span>' : "") + "</td>" +
+        '<td class="date-cell">' + R.shortDateLabel(swing.flyIn) +
+          "<small>" + (daysAway > 0 ? "in " + daysAway + "d" : daysAway === 0 ? "today" : Math.abs(daysAway) + "d ago") + "</small></td>" +
+        '<td class="date-cell">' + R.shortDateLabel(swing.flyOut) + "</td>" +
+        "<td>" + swing.days + "</td>" +
+        '<td><span class="chip ' + (swing.shift === "night" ? "chip-night" : "chip-day") + '">' + (swing.shift === "night" ? "Nights" : "Days") + "</span></td>" +
+        "<td>" + swing.breakDays + " <span style=\"color:var(--muted-2)\">to " + R.shortDateLabel(R.addDays(swing.breakEnds, -1)) + "</span></td>" +
+        '<td><span class="pay-dots">' + payDays.map(function () { return "<i></i>"; }).join("") +
+          "<span>" + payDays.length + "</span></span></td>" +
+        "</tr>";
+    }).join("");
+  }
+
+  /* ------------------------------------------------------------- sidebar */
+
+  function syncControls() {
+    $("presetGrid").innerHTML = R.PRESETS.map(function (preset) {
+      var active = state.preset === preset.id ? " active" : "";
+      var onsite = preset.id === "custom" ? state.onsite : preset.onsite;
+      var off = preset.id === "custom" ? state.off : preset.off;
+      return '<button type="button" class="preset' + active + '" data-preset="' + preset.id + '" ' +
+        'data-onsite="' + onsite + '" data-off="' + off + '" title="' + preset.note + '">' +
+        "<b>" + (preset.id === "custom" ? state.onsite + "/" + state.off : preset.label) + "</b>" +
+        "<small>" + preset.note + "</small></button>";
+    }).join("");
+
+    $("patternTag").textContent = (state.onsite + state.off) + "-day cycle";
+    $("patternSummary").innerHTML = "<b>" + state.onsite + " days on</b> · <b>" + state.off + " days off</b><br>" +
+      "Repeat every " + (state.onsite + state.off) + " days · " + R.homePercent(pattern()) + "% of the year at home.<br>" +
+      "About " + Math.round(365.25 / (state.onsite + state.off)) + " swings a year.";
+
+    $("customRow").hidden = state.preset !== "custom";
+    $("onsiteInput").value = state.onsite;
+    $("offInput").value = state.off;
+    $("anchorInput").value = state.anchor;
+    $("travelSelect").value = state.flyOutAsHome ? "home" : "onsite";
+
+    Array.prototype.forEach.call($("shiftSegmented").children, function (btn) {
+      btn.classList.toggle("active", btn.getAttribute("data-shift") === state.shift);
+    });
+    Array.prototype.forEach.call($("weekStartSegmented").children, function (btn) {
+      btn.classList.toggle("active", Number(btn.getAttribute("data-week")) === Number(state.weekStart));
+    });
+    Array.prototype.forEach.call($("viewSwitch").children, function (btn) {
+      btn.classList.toggle("active", btn.getAttribute("data-view") === state.view);
+    });
+
+    $("payFreq").value = state.payFreq;
+    $("payEveryRow").hidden = state.payFreq !== "custom";
+    $("payEvery").value = state.payEvery;
+    $("payAnchor").value = state.payAnchor;
+    $("payAmount").value = state.payAmount === null ? "" : state.payAmount;
+    $("payTag").textContent = R.payLabel(payConfig());
+
+    $("showNotes").checked = !!state.showNotes;
+    $("showPay").checked = !!state.showPay;
+    $("showOutside").checked = !!state.showOutside;
+  }
+
+  function buildPayOptions() {
+    $("payFreq").innerHTML = R.PAY_FREQUENCIES.map(function (freq) {
+      return '<option value="' + freq.id + '">' + freq.label + "</option>";
+    }).join("");
+  }
+
+  /* --------------------------------------------------------------- drawer */
+
+  function openDrawer(iso) {
+    var date = R.fromISO(iso);
+    var day = R.describeDay(pattern(), date);
+    var pat = pattern();
+    var today = R.today();
+    var pay = payConfig();
+    var payToday = R.paydaysInRange(pay, date, date).length > 0;
+    var nextPay = R.nextPayday(pay, date, true);
+    var swing = R.swingsInRange(pat, R.addDays(date, -pat.cycle), R.addDays(date, pat.cycle))
+      .filter(function (s) { return s.number === day.swing; })[0];
+
+    selectedISO = iso;
+
+    $("drawerKicker").textContent = "Swing " + swingLabel(day.swing) + " · " + (day.onsite ? "day " + day.dayOfSwing + " of " + day.daysInSwing : "R&R day " + day.dayOfBreak + " of " + day.daysOfBreak);
+    $("drawerDate").textContent = R.longDateLabel(date);
+
+    var bannerCls = day.onsite ? "onsite" : "home";
+    $("drawerBody").innerHTML =
+      '<div class="status-banner ' + bannerCls + '">' +
+        '<svg class="icon"><use href="#' + (day.isTravel ? "i-plane" : day.onsite ? "i-truck" : "i-helmet") + '" /></svg>' +
+        "<div><b>" + statusText(day) + "</b><span>" + positionText(day) + " · " +
+          (day.shift === "night" ? "Night shift" : "Day shift") + "</span></div>" +
+      "</div>" +
+      '<ul class="detail-list">' +
+        row("Swing number", swingLabel(day.swing), "amber") +
+        row("Cycle position", "Day " + (day.cycleIndex + 1) + " of " + day.cycle) +
+        row("Roster", state.onsite + " on / " + state.off + " off") +
+        row("Cycle anchor", R.shortDateLabel(R.fromISO(state.anchor)), "mono") +
+        (swing ? row("Fly in", R.shortDateLabel(swing.flyIn), "mono") : "") +
+        (swing ? row("Fly out", R.shortDateLabel(swing.flyOut), "mono") : "") +
+        (swing ? row("Back onsite", R.shortDateLabel(swing.nextFlyIn), "mono") : "") +
+        row("Days until", R.diffDays(today, date) === 0 ? "That is today" : countdown(Math.abs(R.diffDays(today, date))) + (R.diffDays(today, date) > 0 ? " away" : " ago")) +
+        row("Pay day", payToday ? "Yes — today" : (nextPay ? "No — next " + R.shortDateLabel(nextPay) : "—"), payToday ? "gold" : "") +
+        (state.payAmount ? row("Pay per cycle", money(state.payAmount), "gold") : "") +
+      "</ul>";
+
+    $("drawerNote").value = state.notes[iso] || "";
+    $("drawer").hidden = false;
+    $("drawerBackdrop").hidden = false;
+    render();
+    setTimeout(function () { $("drawerNote").focus(); }, 40);
+  }
+
+  function row(label, value, cls) {
+    return '<li><span class="k">' + label + '</span><span class="v ' + (cls || "") + '">' + value + "</span></li>";
+  }
+
+  function closeDrawer() {
+    selectedISO = null;
+    $("drawer").hidden = true;
+    $("drawerBackdrop").hidden = true;
+    render();
+  }
+
+  function drawerSummary() {
+    var iso = selectedISO;
+    if (!iso) return "";
+    var date = R.fromISO(iso);
+    var day = R.describeDay(pattern(), date);
+    var swing = R.swingsInRange(pattern(), R.addDays(date, -pattern().cycle), R.addDays(date, pattern().cycle))
+      .filter(function (s) { return s.number === day.swing; })[0];
+    var lines = [
+      R.longDateLabel(date),
+      statusText(day) + " · " + positionText(day) + " · " + (day.shift === "night" ? "Nights" : "Days"),
+      "Roster: " + state.onsite + " on / " + state.off + " off (cycle " + (state.onsite + state.off) + " days)"
+    ];
+    if (swing) {
+      lines.push("Swing " + swingLabel(swing.number) + ": fly in " + R.shortDateLabel(swing.flyIn) + ", fly out " + R.shortDateLabel(swing.flyOut));
+    }
+    if (R.paydaysInRange(payConfig(), date, date).length) lines.push("Pay day");
+    if (state.notes[iso]) lines.push("Note: " + state.notes[iso]);
+    return lines.join("\n");
+  }
+
+  /* ------------------------------------------------------------------ ics */
+
+  function icsDate(date) {
+    return date.getFullYear() + R.pad2(date.getMonth() + 1) + R.pad2(date.getDate());
+  }
+
+  function icsEscape(text) {
+    return String(text).replace(/\\/g, "\\\\").replace(/;/g, "\\;").replace(/,/g, "\\,").replace(/\n/g, "\\n");
+  }
+
+  function icsFold(line) {
+    if (line.length <= 74) return line;
+    var out = [];
+    var rest = line;
+    out.push(rest.slice(0, 74));
+    rest = rest.slice(74);
+    while (rest.length) {
+      out.push(" " + rest.slice(0, 73));
+      rest = rest.slice(73);
+    }
+    return out.join("\r\n");
+  }
+
+  function buildICS() {
+    var pat = pattern();
+    var pay = payConfig();
+    var start = R.startOfMonth(R.fromISO(state.cursor));
+    var end = R.addDays(R.addMonths(start, 12), -1);
+    var lines = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//SWING//FIFO Roster Planner//EN",
+      "CALSCALE:GREGORIAN",
+      "METHOD:PUBLISH",
+      "X-WR-CALNAME:SWING " + state.onsite + "/" + state.off + " roster"
+    ];
+
+    function event(uid, dateStart, dateEnd, summary, description, alarm) {
+      lines.push("BEGIN:VEVENT");
+      lines.push("UID:" + uid + "@swing.roster");
+      lines.push("DTSTAMP:" + icsDate(R.today()) + "T000000Z");
+      lines.push("DTSTART;VALUE=DATE:" + icsDate(dateStart));
+      lines.push("DTEND;VALUE=DATE:" + icsDate(dateEnd || R.addDays(dateStart, 1)));
+      lines.push("SUMMARY:" + icsEscape(summary));
+      lines.push("DESCRIPTION:" + icsEscape(description));
+      lines.push("TRANSP:TRANSPARENT");
+      if (alarm) {
+        lines.push("BEGIN:VALARM");
+        lines.push("TRIGGER:-PT12H");
+        lines.push("ACTION:DISPLAY");
+        lines.push("DESCRIPTION:" + icsEscape(summary));
+        lines.push("END:VALARM");
+      }
+      lines.push("END:VEVENT");
+    }
+
+    R.swingsInRange(pat, start, end).forEach(function (swing) {
+      var shift = swing.shift === "night" ? "Nights" : "Days";
+      event("swing-" + swing.number, swing.flyIn, R.addDays(swing.flyOut, 1),
+        "Onsite · swing #" + swing.number + " (" + shift + ")",
+        state.onsite + " days onsite, " + state.off + " days home. Fly in " + R.shortDateLabel(swing.flyIn) + ", fly out " + R.shortDateLabel(swing.flyOut) + ".");
+      event("flyin-" + swing.number, swing.flyIn, null, "✈ Fly in · swing #" + swing.number,
+        "First day of swing #" + swing.number + ".", true);
+      event("flyout-" + swing.number, swing.flyOut, null, "✈ Fly out · swing #" + swing.number,
+        "Last day of swing #" + swing.number + ".", true);
+    });
+
+    R.paydaysInRange(pay, start, end).forEach(function (date) {
+      event("pay-" + icsDate(date), date, null, "Pay day", "Pay day — " + R.payLabel(pay));
+    });
+
+    Object.keys(state.notes).forEach(function (iso) {
+      var text = (state.notes[iso] || "").trim();
+      if (!text) return;
+      var date = R.fromISO(iso);
+      if (R.diffDays(start, date) < 0 || R.diffDays(date, end) < 0) return;
+      event("note-" + iso, date, null, "Roster note: " + text, text);
+    });
+
+    lines.push("END:VCALENDAR");
+    return lines.map(icsFold).join("\r\n");
+  }
+
+  function downloadICS() {
+    var blob = new Blob([buildICS()], { type: "text/calendar;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = "swing-roster-" + state.onsite + "-" + state.off + ".ics";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    toast("Calendar file downloaded — 12 months of swings");
+  }
+
+  /* ---------------------------------------------------------- print sheet */
+
+  function sheetOptions() {
+    return {
+      paper: $("sheetPaper").value,
+      orientation: $("sheetOrientation").value,
+      notes: $("sheetNotes").checked,
+      swings: $("sheetSwings").checked,
+      legend: $("sheetLegend").checked,
+      colour: $("sheetColour").checked
+    };
+  }
+
+  function sheetSize(options) {
+    var landscape = options.orientation === "landscape";
+    var letter = options.paper === "letter";
+    return {
+      width: letter ? (landscape ? "279mm" : "216mm") : (landscape ? "297mm" : "210mm"),
+      height: letter ? (landscape ? "216mm" : "279mm") : (landscape ? "210mm" : "297mm")
+    };
+  }
+
+  function buildPrintSheet() {
+    var pat = pattern();
+    var pay = payConfig();
+    var options = sheetOptions();
+    var cursor = R.fromISO(state.cursor);
+    var monthStart = R.startOfMonth(cursor);
+    var monthEnd = R.endOfMonth(cursor);
+    var gridStart = R.startOfWeek(monthStart, Number(state.weekStart));
+    var gridEnd = R.addDays(R.startOfWeek(monthEnd, Number(state.weekStart)), 6);
+    var days = R.range(gridStart, gridEnd);
+    var today = R.today();
+    var stats = R.summarise(pat, pay, monthStart, monthEnd);
+
+    var cells = days.map(function (date) {
+      var day = R.describeDay(pat, date);
+      var inMonth = date.getMonth() === cursor.getMonth();
+      var isPay = R.paydaysInRange(pay, date, date).length > 0;
+      var note = state.notes[day.iso];
+      var cls = ["ps-day"];
+      if (!inMonth) cls.push("ps-outside");
+      else cls.push(day.onsite ? "ps-onsite" : "ps-home");
+      if (inMonth && day.isFlyIn) cls.push("ps-fly-in");
+      if (inMonth && day.isFlyOut) cls.push("ps-fly-out");
+      if (isPay) cls.push("ps-pay");
+      if (R.isSameDay(date, today)) cls.push("ps-today");
+
+      var status = "";
+      var meta = "";
+      var flags = "";
+      if (inMonth) {
+        status = statusText(day);
+        meta = day.onsite
+          ? "Day " + day.dayOfSwing + " of " + day.daysInSwing + " · " + (day.shift === "night" ? "Nights" : "Days")
+          : "R&R day " + day.dayOfBreak + " of " + day.daysOfBreak;
+        if (day.isFlyIn) flags += '<span class="ps-flag fly">Fly in</span>';
+        if (day.isFlyOut) flags += '<span class="ps-flag fly">' + (day.onsite ? "Fly out" : "Home") + "</span>";
+      }
+      if (isPay) flags += '<span class="ps-flag pay">Pay</span>';
+
+      return '<div class="' + cls.join(" ") + '">' +
+        '<span class="ps-num">' + date.getDate() + "</span>" +
+        (status ? '<span class="ps-status">' + status + "</span>" : "") +
+        (meta ? '<span class="ps-meta-line">' + meta + "</span>" : "") +
+        (flags ? '<span class="ps-flags">' + flags + "</span>" : "") +
+        (options.notes && note ? '<span class="ps-note">' + escapeHtml(note) + "</span>" : "") +
+        "</div>";
+    }).join("");
+
+    var swings = R.swingsInRange(pat, monthStart, monthEnd);
+    var swingRows = swings.map(function (swing) {
+      var payDays = R.paydaysInRange(pay, swing.flyIn, swing.breakEnds);
+      return "<tr><td>#" + swing.number + "</td>" +
+        "<td>" + R.shortDateLabel(swing.flyIn) + "</td>" +
+        "<td>" + R.shortDateLabel(swing.flyOut) + "</td>" +
+        "<td>" + swing.days + "</td>" +
+        "<td>" + (swing.shift === "night" ? "Nights" : "Days") + "</td>" +
+        "<td>" + payDays.length + "</td></tr>";
+    }).join("");
+
+    var sheet = $("printSheet");
+    sheet.classList.toggle("no-colour", !options.colour);
+    sheet.innerHTML =
+      '<div class="ps-head">' +
+        '<div class="ps-brand">' +
+          '<span class="ps-brand-mark"><svg class="icon"><use href="#i-helmet" /></svg></span>' +
+          '<div><div class="ps-eyebrow">FIFO roster planner</div><div class="ps-wordmark">SWING</div></div>' +
+        "</div>" +
+        '<div class="ps-title">' +
+          '<div class="ps-month">' + R.MONTHS[cursor.getMonth()] + " " + cursor.getFullYear() + "</div>" +
+          '<div class="ps-sub">' + state.onsite + " days on / " + state.off + " days off · " +
+            (state.onsite + state.off) + "-day cycle</div>" +
+        "</div>" +
+      "</div>" +
+      '<div class="ps-meta">' +
+        "<span>Anchor <b>" + R.shortDateLabel(R.fromISO(state.anchor)) + "</b></span>" +
+        "<span>Shift <b>" + (state.shift === "rotate" ? "Rotating" : state.shift === "night" ? "Nights" : "Days") + "</b></span>" +
+        "<span>Pay <b>" + R.payLabel(pay) + " from " + R.shortDateLabel(R.fromISO(state.payAnchor)) + "</b></span>" +
+      "</div>" +
+      '<div class="ps-week">' + R.weekdayInitials(Number(state.weekStart)).map(function (initial) {
+        return "<span>" + initial + "</span>";
+      }).join("") + "</div>" +
+      '<div class="ps-grid" style="grid-template-rows: repeat(' + (days.length / 7) + ', minmax(0, 1fr))">' +
+        cells + "</div>" +
+      '<div class="ps-summary">' +
+        "<div><b>" + stats.onsite + "</b><span>Days onsite</span></div>" +
+        "<div><b>" + stats.home + "</b><span>Days home</span></div>" +
+        "<div><b>" + stats.homePercent + "%</b><span>Home share</span></div>" +
+        "<div><b>" + stats.swings + "</b><span>Swings</span></div>" +
+        "<div><b>" + stats.paydays + "</b><span>Pay days</span></div>" +
+      "</div>" +
+      (options.swings && swings.length
+        ? '<div class="ps-swings"><h4>Swings in ' + R.MONTHS[cursor.getMonth()] + "</h4><table>" +
+            "<thead><tr><th>Swing</th><th>Fly in</th><th>Fly out</th><th>Days on</th><th>Shift</th><th>Pay days</th></tr></thead>" +
+            "<tbody>" + swingRows + "</tbody></table></div>"
+        : "") +
+      '<div class="ps-foot">' +
+        (options.legend
+          ? '<div class="ps-legend">' +
+              '<span><i style="background:var(--p-onsite)"></i>Onsite</span>' +
+              '<span><i style="background:var(--p-home)"></i>Home</span>' +
+              '<span><i style="background:var(--p-fly)"></i>Fly in / out</span>' +
+              '<span><i style="background:var(--p-pay)"></i>Pay day</span>' +
+            "</div>"
+          : "<span></span>") +
+        "<span>Generated " + R.shortDateLabel(today) + " · confirm against your official roster</span>" +
+      "</div>";
+  }
+
+  function fitPrintSheet() {
+    var sheet = $("printSheet");
+    var scroll = $("sheetScroll");
+    if (!sheet || !scroll || $("sheetModal").hidden) return;
+    var options = sheetOptions();
+    var size = sheetSize(options);
+    sheet.style.width = size.width;
+    sheet.style.minHeight = size.height;
+    sheet.style.zoom = "";
+    var natural = sheet.getBoundingClientRect().width;
+    var available = scroll.clientWidth - 32;
+    sheet.style.zoom = natural ? Math.min(1, available / natural).toFixed(3) : 1;
+    $("sheetHint").textContent = (options.paper === "letter" ? "US Letter" : "A4") + " · " +
+      options.orientation + " · " + R.monthLabel(R.fromISO(state.cursor));
+  }
+
+  function openPrintSheet() {
+    $("sheetModalTitle").textContent = R.monthLabel(R.fromISO(state.cursor));
+    $("sheetModal").hidden = false;
+    $("sheetBackdrop").hidden = false;
+    buildPrintSheet();
+    fitPrintSheet();
+  }
+
+  function closePrintSheet() {
+    $("sheetModal").hidden = true;
+    $("sheetBackdrop").hidden = true;
+  }
+
+  function refreshPrintSheet() {
+    if ($("sheetModal").hidden) return;
+    buildPrintSheet();
+    fitPrintSheet();
+  }
+
+  function printPrintSheet() {
+    var options = sheetOptions();
+    var rule = "@page { size: " + (options.paper === "letter" ? "letter" : "A4") + " " +
+      options.orientation + "; margin: 12mm; }";
+    var tag = $("sheetPageStyle");
+    if (!tag) {
+      tag = document.createElement("style");
+      tag.id = "sheetPageStyle";
+      document.head.appendChild(tag);
+    }
+    tag.textContent = rule;
+    document.body.classList.add("sheet-printing");
+    var clear = function () {
+      document.body.classList.remove("sheet-printing");
+      window.removeEventListener("afterprint", clear);
+      clearTimeout(fallback);
+    };
+    var fallback = setTimeout(clear, 2000);   // some browsers never fire afterprint
+    window.addEventListener("afterprint", clear);
+    window.print();
+  }
+
+  /* ---------------------------------------------------------------- share */
+
+  function shareURL() {
+    var base = window.location.origin + window.location.pathname;
+    var query = toQuery();
+    return base + (query ? "?" + query : "");
+  }
+
+  /* ----------------------------------------------------------------- init */
+
+  function commitCustomNumbers() {
+    syncPresetFromNumbers();
+    save();
+    render();
+  }
+
+  function moveCursor(months) {
+    var next = R.addMonths(R.fromISO(state.cursor), months);
+    setState({ cursor: R.toISO(next) });
+  }
+
+  function setView(view) {
+    setState({ view: view });
+  }
+
+  function bind() {
+    $("presetGrid").addEventListener("click", function (event) {
+      var btn = event.target.closest("[data-preset]");
+      if (!btn) return;
+      var id = btn.getAttribute("data-preset");
+      setState({
+        preset: id,
+        onsite: Number(btn.getAttribute("data-onsite")) || state.onsite,
+        off: Number(btn.getAttribute("data-off")) || state.off
+      });
+    });
+
+    $("onsiteInput").addEventListener("change", function () {
+      state.onsite = R.clampInt(this.value, 1, 120, state.onsite);
+      commitCustomNumbers();
+    });
+    $("offInput").addEventListener("change", function () {
+      state.off = R.clampInt(this.value, 1, 120, state.off);
+      commitCustomNumbers();
+    });
+    $("anchorInput").addEventListener("change", function () {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(this.value)) setState({ anchor: this.value });
+      else this.value = state.anchor;
+    });
+    $("anchorTodayBtn").addEventListener("click", function () {
+      setState({ anchor: R.toISO(R.today()) });
+      toast("Anchor set to today");
+    });
+    $("travelSelect").addEventListener("change", function () {
+      setState({ flyOutAsHome: this.value === "home" });
+    });
+
+    $("shiftSegmented").addEventListener("click", function (event) {
+      var btn = event.target.closest("[data-shift]");
+      if (btn) setState({ shift: btn.getAttribute("data-shift") });
+    });
+    $("weekStartSegmented").addEventListener("click", function (event) {
+      var btn = event.target.closest("[data-week]");
+      if (btn) setState({ weekStart: Number(btn.getAttribute("data-week")) });
+    });
+    $("viewSwitch").addEventListener("click", function (event) {
+      var btn = event.target.closest("[data-view]");
+      if (btn) setView(btn.getAttribute("data-view"));
+    });
+
+    $("payFreq").addEventListener("change", function () { setState({ payFreq: this.value }); });
+    $("payEvery").addEventListener("change", function () {
+      setState({ payEvery: R.clampInt(this.value, 1, 365, 28) });
+    });
+    $("payAnchor").addEventListener("change", function () {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(this.value)) setState({ payAnchor: this.value });
+    });
+    $("payAmount").addEventListener("change", function () {
+      var value = parseFloat(this.value);
+      setState({ payAmount: isFinite(value) && value >= 0 ? value : null });
+    });
+
+    ["showNotes", "showPay", "showOutside"].forEach(function (id) {
+      $(id).addEventListener("change", function () {
+        var patch = {};
+        patch[id] = this.checked;
+        setState(patch);
+      });
+    });
+
+    $("prevBtn").addEventListener("click", function () { moveCursor(state.view === "year" ? -12 : state.view === "quarter" ? -3 : -1); });
+    $("nextBtn").addEventListener("click", function () { moveCursor(state.view === "year" ? 12 : state.view === "quarter" ? 3 : 1); });
+    $("todayBtn").addEventListener("click", function () {
+      setState({ cursor: R.toISO(R.startOfMonth(R.today())) });
+    });
+
+    $("calendar").addEventListener("click", function (event) {
+      var jump = event.target.closest("[data-jump]");
+      if (jump) {
+        setState({ cursor: jump.getAttribute("data-jump"), view: "month" });
+        return;
+      }
+      var cell = event.target.closest("[data-iso]");
+      if (cell) openDrawer(cell.getAttribute("data-iso"));
+    });
+
+    $("drawerClose").addEventListener("click", closeDrawer);
+    $("drawerDone").addEventListener("click", closeDrawer);
+    $("drawerBackdrop").addEventListener("click", closeDrawer);
+    $("drawerCopy").addEventListener("click", function () {
+      copyText(drawerSummary()).then(function () { toast("Day summary copied"); })
+        .catch(function () { toast("Copy failed — select the text instead"); });
+    });
+
+    var noteTimer = null;
+    $("drawerNote").addEventListener("input", function () {
+      var iso = selectedISO;
+      var value = this.value;
+      clearTimeout(noteTimer);
+      noteTimer = setTimeout(function () {
+        if (!iso) return;
+        if (value.trim()) state.notes[iso] = value;
+        else delete state.notes[iso];
+        save();
+        render();
+      }, 350);
+    });
+
+    $("shareBtn").addEventListener("click", function () {
+      copyText(shareURL()).then(function () { toast("Share link copied to clipboard"); })
+        .catch(function () { toast("Copy failed — the link is in the address bar"); });
+    });
+    $("icsBtn").addEventListener("click", downloadICS);
+    $("printBtn").addEventListener("click", function () { window.print(); });
+
+    $("printMonthBtn").addEventListener("click", openPrintSheet);
+    $("sheetClose").addEventListener("click", closePrintSheet);
+    $("sheetCancel").addEventListener("click", closePrintSheet);
+    $("sheetBackdrop").addEventListener("click", closePrintSheet);
+    $("sheetPrintBtn").addEventListener("click", printPrintSheet);
+    ["sheetPaper", "sheetOrientation", "sheetNotes", "sheetSwings", "sheetLegend", "sheetColour"]
+      .forEach(function (id) {
+        $(id).addEventListener("change", refreshPrintSheet);
+      });
+
+    $("resetBtn").addEventListener("click", function () {
+      if (!window.confirm("Reset the roster, pay settings and notes back to defaults?")) return;
+      state = defaults();
+      save();
+      closeDrawer();
+      toast("Roster reset to an 8/6 swing");
+    });
+
+    $("sidebarToggle").addEventListener("click", function () {
+      var sidebar = $("sidebar");
+      var open = sidebar.classList.toggle("open");
+      this.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+
+    document.addEventListener("keydown", function (event) {
+      var tag = (event.target.tagName || "").toLowerCase();
+      if (tag === "input" || tag === "textarea" || tag === "select") return;
+      if (event.key === "ArrowLeft") moveCursor(state.view === "year" ? -12 : state.view === "quarter" ? -3 : -1);
+      else if (event.key === "ArrowRight") moveCursor(state.view === "year" ? 12 : state.view === "quarter" ? 3 : 1);
+      else if (event.key === "Escape") {
+        if (!$("sheetModal").hidden) closePrintSheet();
+        else if (selectedISO) closeDrawer();
+        else if ($("sidebar").classList.contains("open")) $("sidebar").classList.remove("open");
+      }
+      else if (event.key.toLowerCase() === "t") $("todayBtn").click();
+      else if (event.key.toLowerCase() === "m") setView("month");
+      else if (event.key.toLowerCase() === "y") setView("year");
+      else if (event.key === "3") setView("quarter");
+      else return;
+      event.preventDefault();
+    });
+
+    window.addEventListener("resize", function () {
+      if (window.innerWidth > 1000) $("sidebar").classList.remove("open");
+      fitPrintSheet();
+    });
   }
 
   function init() {
-    bindStaticUI();
-    renderLocation(currentLocation);
-    renderSaved();
-    updateWeightsUI();
-    if (window.L) initMap();
-    else showMapFallback();
-  }
-
-  function initMap() {
-    map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true }).setView(currentLocation.coords, currentLocation.zoom);
-
-    baseLayers.satellite = L.tileLayer(
-      "https://spatial-img.information.qld.gov.au/arcgis/rest/services/Basemaps/LatestSatelliteWOS_AllUsers/ImageServer/tile/{z}/{y}/{x}",
-      { maxZoom: 18, minZoom: 3, attribution: "Imagery © State of Queensland (Department of Resources)" }
-    );
-    baseLayers.topo = L.tileLayer(
-      "https://gisservices.information.qld.gov.au/arcgis/rest/services/Basemaps/QldMap_Topo/MapServer/tile/{z}/{y}/{x}?blankTile=false&browserCache=Map",
-      { maxZoom: 18, minZoom: 3, attribution: "Topo © State of Queensland (Department of Resources)" }
-    );
-    baseLayers.street = L.tileLayer(
-      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-      { maxZoom: 19, minZoom: 3, subdomains: "abc", attribution: "© OpenStreetMap contributors" }
-    );
-    setBasemap(state.style, false);
-
-    var permitsUrl = "https://spatial-gis.information.qld.gov.au/arcgis/services/Economy/MinesPermitsCurrent/MapServer/WMSServer";
-    var geologyUrl = "https://gisservices.information.qld.gov.au/arcgis/services/GeoscientificInformation/GeologyDetailed/MapServer/WMSServer";
-    var resourcesUrl = "https://spatial-gis.information.qld.gov.au/arcgis/services/GeoscientificInformation/MiningResources/MapServer/WMSServer";
-    var stateGeologyUrl = "https://spatial-gis.information.qld.gov.au/arcgis/services/GeoscientificInformation/GeologyState/MapServer/WMSServer";
-    var geophysicsUrl = "https://spatial-gis.information.qld.gov.au/arcgis/services/GeoscientificInformation/Geophysics/MapServer/WMSServer";
-
-    overlayLayers.leases = L.tileLayer.wms(permitsUrl, {
-      layers: "44", format: "image/png", transparent: true, version: "1.3.0", opacity: .8,
-      attribution: "Tenure © State of Queensland"
-    });
-    overlayLayers.permits = L.tileLayer.wms(permitsUrl, {
-      layers: "3", format: "image/png", transparent: true, version: "1.3.0", opacity: .68,
-      attribution: "Permits © State of Queensland"
-    });
-    overlayLayers.faults = L.tileLayer.wms(geologyUrl, {
-      layers: "4", format: "image/png", transparent: true, version: "1.3.0", opacity: .9,
-      attribution: "Geology © State of Queensland"
-    });
-    overlayLayers.occurrences = L.tileLayer.wms(resourcesUrl, {
-      layers: "17", format: "image/png", transparent: true, version: "1.3.0", opacity: .9,
-      attribution: "Mineral occurrences © State of Queensland"
-    });
-    overlayLayers.geology = L.tileLayer.wms(stateGeologyUrl, {
-      layers: "6", format: "image/png", transparent: true, version: "1.3.0", opacity: .34,
-      attribution: "Geology © State of Queensland"
-    });
-    overlayLayers.geophysics = L.tileLayer.wms(geophysicsUrl, {
-      layers: "20", format: "image/png", transparent: true, version: "1.3.0", opacity: .53,
-      attribution: "Geophysics © State of Queensland"
-    });
-    overlayLayers.roads = L.tileLayer(
-      "https://gisservices4.information.qld.gov.au/arcgis/rest/services/Transportation/RoadsCache/MapServer/tile/{z}/{y}/{x}?blankTile=false&browserCache=Map",
-      { maxZoom: 18, minZoom: 3, opacity: .7, attribution: "Roads © State of Queensland" }
-    );
-
-    Object.keys(overlayLayers).forEach(function (key) {
-      if (key === "leases" || key === "faults") overlayLayers[key].addTo(map);
-    });
-    rebuildSignalLayer();
-    if (document.querySelector('[data-layer="signals"]').checked) signalLayer.addTo(map);
-    selectTarget(getTargets(currentLocation.coords)[0]);
-
-    map.on("click", handleMapClick);
-    map.on("mousemove", function (event) { updateCoordinate(event.latlng); });
-    map.on("zoomend", updateMapMeta);
-    map.on("moveend", updateMapMeta);
-    setTimeout(function () { map.invalidateSize(); }, 100);
-  }
-
-  function showMapFallback() {
-    var mapEl = $("map");
-    mapEl.innerHTML = '<div class="map-fallback"><span>Map tiles need an internet connection</span><strong>QLD field map</strong><small>Layer controls are still available. Reconnect to load live imagery.</small></div>';
-  }
-
-  function setBasemap(style, announce) {
-    state.style = style;
-    document.querySelectorAll(".style-button").forEach(function (button) {
-      button.classList.toggle("active", button.dataset.style === style);
-    });
-    if (!map || !baseLayers[style]) return;
-    Object.keys(baseLayers).forEach(function (key) {
-      if (map.hasLayer(baseLayers[key])) map.removeLayer(baseLayers[key]);
-    });
-    baseLayers[style].addTo(map);
-    if (announce) showToast(style === "satellite" ? "Latest QLD imagery selected" : style.charAt(0).toUpperCase() + style.slice(1) + " basemap selected");
-    saveState();
-  }
-
-  function toggleLayer(key, enabled) {
-    if (!map || !overlayLayers[key] && key !== "signals") return;
-    var layer = key === "signals" ? signalLayer : overlayLayers[key];
-    if (!layer) return;
-    if (enabled) layer.addTo(map);
-    else map.removeLayer(layer);
-    updateLayerCount();
-  }
-
-  function updateLayerCount() {
-    var count = Array.from(document.querySelectorAll(".layer-toggle")).filter(function (input) { return input.checked; }).length;
-    $("layerCount").textContent = count;
-  }
-
-  function rebuildSignalLayer() {
-    if (!window.L) return;
-    var wasVisible = signalLayer && map && map.hasLayer(signalLayer);
-    if (signalLayer && map) map.removeLayer(signalLayer);
-    signalLayer = L.layerGroup();
-    var targets = getTargets(currentLocation.coords);
-
-    // Soft rings create a useful visual hierarchy without pretending to be a heatmap measurement.
-    targets.forEach(function (target, index) {
-      L.circle(target.coords, {
-        radius: target.radius,
-        color: index === 0 ? "#e5ad47" : "#b7834a",
-        weight: 1,
-        opacity: .74,
-        fillColor: index === 0 ? "#e5ad47" : "#bb8a51",
-        fillOpacity: index === 0 ? .13 : .09,
-        dashArray: index === 0 ? "3 7" : "2 8",
-        interactive: false
-      }).addTo(signalLayer);
-      L.circle(target.coords, {
-        radius: target.radius * .42,
-        color: "#f2c15d",
-        weight: 1,
-        opacity: .34,
-        fillColor: "#d18f3f",
-        fillOpacity: .08,
-        interactive: false
-      }).addTo(signalLayer);
-
-      var icon = L.divIcon({ className: "signal-icon", html: '<div class="signal-marker"><span>' + target.number + '</span></div>', iconSize: [24, 24], iconAnchor: [12, 22] });
-      var marker = L.marker(target.coords, { icon: icon, zIndexOffset: 100 + (3 - index) * 10 }).addTo(signalLayer);
-      marker.bindTooltip("Target " + target.number + " · " + target.score + "/100", { direction: "top", offset: [0, -13], className: "signal-tooltip" });
-      marker.on("click", function (event) {
-        if (event.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
-        selectTarget(target);
-      });
-    });
-
-    // A restrained, local corridor cue for the model preview.
-    var corridor = targets.map(function (item) { return item.coords; });
-    L.polyline(corridor, { color: "#e5ad47", weight: 2, opacity: .65, dashArray: "2 9", interactive: false }).addTo(signalLayer);
-    if (wasVisible || (map && document.querySelector('[data-layer="signals"]').checked)) signalLayer.addTo(map);
-    if (activeTarget) {
-      var newActive = targets.find(function (target) { return target.id === activeTarget.id; });
-      if (newActive) activeTarget = newActive;
+    load();
+    buildPayOptions();
+    bind();
+    render();
+    if (window.location.search) {
+      setTimeout(function () { toast("Loaded a shared roster — saved to this browser"); }, 400);
     }
   }
 
-  function getTargets(center) {
-    var weights = state.weights;
-    var offsets = [
-      { id: "target-1", number: "01", offset: [0.025, 0.060], title: "Burdekin drainage edge", radius: 2200, values: [76, 75, 61], chips: ["Fault edge", "Low slope", "Outside shown ML"], description: "A high-signal starting point where mapped structure meets a broad alluvial corridor." },
-      { id: "target-2", number: "02", offset: [-0.040, -0.022], title: "Old terrace intersection", radius: 1750, values: [72, 68, 70], chips: ["Structure", "Terrace setting", "Occurrence nearby"], description: "A second-pass target with a stronger historical evidence signal and moderate access context." },
-      { id: "target-3", number: "03", offset: [0.060, -0.078], title: "Western lineament break", radius: 1450, values: [85, 48, 45], chips: ["Strong structure", "Higher ground", "Needs checking"], description: "A structural lead worth checking against terrain, access and current tenure before committing a trip." }
-    ];
-    var total = Math.max(1, Number(weights.fault) + Number(weights.drainage) + Number(weights.gold));
-    return offsets.map(function (item) {
-      var weighted = (item.values[0] * Number(weights.fault) + item.values[1] * Number(weights.drainage) + item.values[2] * Number(weights.gold)) / total;
-      var score = Math.round(weighted);
-      return Object.assign({}, item, {
-        score: clamp(score, 1, 99),
-        coords: [center[0] + item.offset[0], center[1] + item.offset[1]]
-      });
-    });
-  }
-
-  function selectTarget(target) {
-    activeTarget = target;
-    customPoint = null;
-    if (inspectionMarker && map) { map.removeLayer(inspectionMarker); inspectionMarker = null; }
-    renderInsight(target);
-  }
-
-  function handleMapClick(event) {
-    var point = { id: "pin-" + Date.now(), number: "—", title: "Dropped field pin", coords: [event.latlng.lat, event.latlng.lng], score: null, description: "A manual point on the map. Add a note after checking the visible planning layers and access context.", chips: ["Manual point", "Check tenure", "Check access"] };
-    customPoint = point;
-    activeTarget = null;
-    if (inspectionMarker) map.removeLayer(inspectionMarker);
-    inspectionMarker = L.marker(point.coords, { icon: L.divIcon({ className: "user-pin-icon", html: '<div class="user-marker"></div>', iconSize: [15, 15], iconAnchor: [7, 7] }) }).addTo(map);
-    inspectionMarker.bindTooltip("Selected field point", { direction: "top", offset: [0, -8] }).openTooltip();
-    renderInsight(point);
-    updateCoordinate(event.latlng);
-  }
-
-  function renderInsight(item) {
-    var isCustom = !item.score;
-    $("insightTitle").textContent = item.title;
-    $("insightScore").textContent = isCustom ? "—" : item.score;
-    $("insightScore").parentElement.querySelector("span").textContent = isCustom ? "" : "/100";
-    $("insightDescription").textContent = item.description;
-    document.querySelector(".target-number").textContent = isCustom ? "⌖" : item.number;
-    document.querySelector(".target-label").textContent = isCustom ? "FIELD NOTE" : "MODEL TARGET";
-    var chips = $("mapInsight").querySelector(".signal-chips");
-    chips.innerHTML = "";
-    var chipList = Array.isArray(item.chips) ? item.chips : ["Saved target", "Check tenure", "Check access"];
-    chipList.forEach(function (chip, index) {
-      var span = document.createElement("span");
-      span.innerHTML = '<i class="chip-dot ' + (index === 1 ? "blue-dot" : index === 2 ? "coral-dot" : "gold-dot") + '"></i>' + chip;
-      chips.appendChild(span);
-    });
-    var saveButton = $("saveTargetBtn");
-    var alreadySaved = state.saved.some(function (saved) { return saved.id === item.id; });
-    saveButton.classList.toggle("saved", alreadySaved);
-    saveButton.innerHTML = alreadySaved ? "<span>★</span> Saved" : "<span>☆</span> Save target";
-    $("mapInsight").classList.remove("hidden");
-  }
-
-  function getActiveItem() {
-    if (customPoint) return customPoint;
-    if (activeTarget) return activeTarget;
-    var targets = getTargets(currentLocation.coords);
-    return targets[0];
-  }
-
-  function saveActiveTarget() {
-    var item = getActiveItem();
-    var existing = state.saved.findIndex(function (saved) { return saved.id === item.id; });
-    if (existing >= 0) {
-      state.saved.splice(existing, 1);
-      showToast("Removed from saved targets");
-    } else {
-      state.saved.unshift({ id: item.id, title: item.title, score: item.score, coords: item.coords, number: item.number, description: item.description, chips: item.chips, area: currentLocation.short, savedAt: new Date().toISOString() });
-      showToast("Target saved to your shortlist ★");
-    }
-    saveState();
-    renderSaved();
-    renderInsight(item);
-  }
-
-  function renderSaved() {
-    var list = $("savedList");
-    var empty = $("emptySaved");
-    list.innerHTML = "";
-    $("savedCount").textContent = state.saved.length;
-    empty.style.display = state.saved.length ? "none" : "block";
-    state.saved.forEach(function (item) {
-      var row = document.createElement("div");
-      row.className = "saved-item";
-      row.innerHTML = '<span class="saved-pin">⌖</span><span><strong>' + escapeHTML(item.title) + '</strong><small>' + escapeHTML(item.area || "Queensland") + (item.score ? " · " + item.score + "/100" : "") + '</small></span><button class="saved-delete" title="Remove saved target" aria-label="Remove saved target">×</button>';
-      row.addEventListener("click", function (event) {
-        if (event.target.closest(".saved-delete")) return;
-        focusSaved(item);
-      });
-      row.querySelector(".saved-delete").addEventListener("click", function (event) {
-        event.stopPropagation();
-        state.saved = state.saved.filter(function (saved) { return saved.id !== item.id; });
-        saveState(); renderSaved(); showToast("Target removed");
-      });
-      list.appendChild(row);
-    });
-  }
-
-  function focusSaved(item) {
-    var distance = Math.abs(item.coords[0] - currentLocation.coords[0]) + Math.abs(item.coords[1] - currentLocation.coords[1]);
-    if (map && distance > .6) {
-      map.setView(item.coords, 12);
-      currentLocation = { id: "saved", name: item.area || "Saved field point", short: item.area || "Saved point", meta: formatCoordinate(item.coords[0], item.coords[1]), coords: item.coords, zoom: 12 };
-      renderLocation(currentLocation);
-    } else if (map) map.setView(item.coords, Math.max(map.getZoom(), 12));
-    var savedItem = Object.assign({
-      number: "—",
-      description: "A saved field point. Re-check the visible layers, current tenure and access context before planning a visit.",
-      chips: ["Saved target", "Check tenure", "Check access"]
-    }, item);
-    if (item.score) selectTarget(savedItem);
-    else { customPoint = savedItem; activeTarget = null; renderInsight(savedItem); }
-    showToast("Centered on saved target");
-  }
-
-  function renderLocation(location) {
-    $("areaName").textContent = location.name;
-    $("areaMeta").textContent = location.meta + " · " + (map ? viewDistance(map.getZoom()) : "11 km view");
-    $("mapTitle").textContent = location.name;
-    $("mapSubtitle").textContent = "Model preview · " + (map ? viewDistance(map.getZoom()) : "11 km view");
-    $("coordinateReadout").textContent = formatCoordinate(location.coords[0], location.coords[1]);
-  }
-
-  function chooseLocation(location) {
-    currentLocation = location;
-    state.areaId = location.id;
-    customPoint = null;
-    if (map) {
-      map.setView(location.coords, location.zoom);
-      rebuildSignalLayer();
-      var targets = getTargets(location.coords);
-      selectTarget(targets[0]);
-    }
-    renderLocation(location);
-    saveState();
-    showToast("Centered on " + location.short);
-  }
-
-  function updateMapMeta() {
-    if (!map) return;
-    var center = map.getCenter();
-    var label = currentLocation.name;
-    $("areaMeta").textContent = formatCoordinate(center.lat, center.lng) + " · " + viewDistance(map.getZoom());
-    $("mapSubtitle").textContent = "Model preview · " + viewDistance(map.getZoom());
-    $("coordinateReadout").textContent = formatCoordinate(center.lat, center.lng);
-    void label;
-  }
-
-  function viewDistance(zoom) {
-    var km = Math.round(720 / Math.pow(2, Math.max(1, zoom - 5)));
-    return Math.max(1, km) + " km view";
-  }
-
-  function updateCoordinate(latlng) { $("coordinateReadout").textContent = formatCoordinate(latlng.lat, latlng.lng); }
-  function formatCoordinate(lat, lng) {
-    var latHem = lat >= 0 ? "N" : "S";
-    var lngHem = lng >= 0 ? "E" : "W";
-    return Math.abs(lat).toFixed(2) + "° " + latHem + "  " + Math.abs(lng).toFixed(2) + "° " + lngHem;
-  }
-  function escapeHTML(value) { return String(value).replace(/[&<>'"]/g, function (char) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]; }); }
-
-  function updateWeightsUI() {
-    var weights = state.weights;
-    $("faultWeight").value = weights.fault;
-    $("drainageWeight").value = weights.drainage;
-    $("goldWeight").value = weights.gold;
-    $("faultValue").textContent = weights.fault + "%";
-    $("drainageValue").textContent = weights.drainage + "%";
-    $("goldValue").textContent = weights.gold + "%";
-    var target = activeTarget || getTargets(currentLocation.coords)[0];
-    var total = Number(weights.fault) + Number(weights.drainage) + Number(weights.gold);
-    var score = Math.round((target.values[0] * Number(weights.fault) + target.values[1] * Number(weights.drainage) + target.values[2] * Number(weights.gold)) / Math.max(1, total));
-    $("scorePreview").textContent = clamp(score, 1, 99);
-    $("weightWarning").hidden = total > 0;
-  }
-
-  function runModel() {
-    updateWeightsUI();
-    rebuildSignalLayer();
-    var target = activeTarget || getTargets(currentLocation.coords)[0];
-    if (target) selectTarget(getTargets(currentLocation.coords).find(function (item) { return item.id === target.id; }) || getTargets(currentLocation.coords)[0]);
-    saveState();
-    showToast("Signal model refreshed for this area");
-  }
-
-  function openModal(title, html) {
-    $("modalTitle").textContent = title;
-    $("modalContent").innerHTML = html;
-    $("modalBackdrop").hidden = false;
-  }
-  function closeModal() { $("modalBackdrop").hidden = true; }
-  function showSourceModal(key) {
-    var content = {
-      basemap: ["Basemap sources", '<p>Satellite imagery is the latest publicly available Queensland imagery service. Topo is the Queensland Government topographic cache. Street view uses OpenStreetMap as a lightweight fallback reference.</p><ul class="source-list"><li><strong>Imagery:</strong> Queensland Department of Resources</li><li><strong>Topo:</strong> Queensland Department of Resources</li><li><strong>Street:</strong> OpenStreetMap contributors</li></ul>'],
-      leases: ["Current mining leases", '<p>This layer is the granted <strong>ML permit</strong> sub-layer from Queensland’s current mines and permits service. The service says it is updated nightly. A rendered map layer is not a substitute for checking the live authority record.</p><p><a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noopener">Verify in GeoResGlobe ↗</a></p>'],
-      permits: ["Exploration permits", '<p>Shows granted mineral exploration permit areas (EPM) from the Queensland current permits service. It is included as a context layer so you can spot ground that needs a more careful tenure check.</p><p><a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noopener">Open the authority viewer ↗</a></p>'],
-      faults: ["Faults & shear zones", '<p>Detailed mapped faults and shear zones from the Queensland geology service. Structure can help frame a search, but a line on a regional map does not tell you where gold is or whether land is accessible.</p><p><a href="https://www.data.qld.gov.au/dataset/queensland-geology-series" target="_blank" rel="noopener">View Queensland geology data ↗</a></p>'],
-      occurrences: ["Mineral occurrences", '<p>Known mineral resource sites and occurrences from the Geological Survey of Queensland. The layer is deliberately separate from the model so you can inspect the evidence instead of taking a score on trust.</p>'],
-      geology: ["Host geology", '<p>State surface geology gives regional context for rock units and structure. It is not a gold prospectivity map. Use it alongside field observations and the original GSQ data.</p>'],
-      geophysics: ["Magnetic response", '<p>This is the Queensland magnetic image: a regional airborne geophysics layer that can reveal broad changes in rock properties and help frame structural questions.</p><p>It is not a metal detector and should never be interpreted without its scale, survey history and the rest of the geology.</p>'],
-      roads: ["Roads & access context", '<p>Roads are reference-only. Track condition, gates, private property, native title, protected areas and access permissions still need to be checked on the ground and with the relevant authority.</p>'],
-      signals: ["Prospecting signal", '<p>The beta signal combines three visible planning ideas: proximity to mapped structure, a drainage / low-slope setting proxy, and evidence from known mineral occurrences. Weights are adjustable in Scout plan.</p><p><strong>It is not a geological prediction, “magic scan”, or guarantee of gold.</strong> It is designed to reduce random driving and make your assumptions explicit.</p>']
-    }[key] || ["About Gold Scout", "<p>A field planning prototype for Queensland prospectors.</p>"];
-    openModal(content[0], content[1]);
-  }
-
-  function inspectActive() {
-    var item = getActiveItem();
-    var score = item.score ? '<div class="detail-score"><strong>' + item.score + '</strong><span>/100 model signal</span></div>' : "";
-    openModal(item.title, '<p>' + escapeHTML(item.description) + '</p>' + score + '<ul class="source-list"><li><strong>Coordinates:</strong> ' + formatCoordinate(item.coords[0], item.coords[1]) + '</li><li><strong>Next check:</strong> current tenure and access status</li><li><strong>Field note:</strong> compare satellite, topo and what is actually visible on the ground</li></ul><p>Save this point to keep it in your field shortlist.</p>');
-  }
-
-  function shareMap() {
-    var url = location.href.split("#")[0] + "#area=" + encodeURIComponent(currentLocation.id || DEFAULT_AREA);
-    if (navigator.share) {
-      navigator.share({ title: "Gold Scout field map", text: "A Queensland prospecting map I’m checking out", url: url }).catch(function () {});
-    } else if (navigator.clipboard) {
-      navigator.clipboard.writeText(url).then(function () { showToast("Map link copied"); }, function () { fallbackCopy(url); });
-    } else fallbackCopy(url);
-  }
-  function fallbackCopy(text) {
-    var field = document.createElement("textarea");
-    field.value = text; field.style.position = "fixed"; field.style.opacity = "0";
-    document.body.appendChild(field); field.select();
-    try { document.execCommand("copy"); showToast("Map link copied"); } catch (error) { window.prompt("Copy this map link", text); }
-    document.body.removeChild(field);
-  }
-
-  function bindStaticUI() {
-    document.querySelectorAll(".style-button").forEach(function (button) {
-      button.addEventListener("click", function () { setBasemap(button.dataset.style, true); });
-    });
-    document.querySelectorAll(".layer-toggle").forEach(function (input) {
-      input.addEventListener("change", function () { toggleLayer(input.dataset.layer, input.checked); saveState(); });
-    });
-    document.querySelectorAll(".layer-info").forEach(function (button) {
-      button.addEventListener("click", function (event) { event.preventDefault(); event.stopPropagation(); showSourceModal(button.dataset.info); });
-    });
-    document.querySelectorAll(".side-tab").forEach(function (button) {
-      button.addEventListener("click", function () {
-        document.querySelectorAll(".side-tab").forEach(function (tab) { tab.classList.remove("active"); });
-        document.querySelectorAll(".tab-panel").forEach(function (panel) { panel.classList.remove("active"); });
-        button.classList.add("active");
-        $(button.dataset.tab + "Tab").classList.add("active");
-      });
-    });
-    $("saveTargetBtn").addEventListener("click", saveActiveTarget);
-    $("inspectBtn").addEventListener("click", inspectActive);
-    $("howItWorksBtn").addEventListener("click", function () { showSourceModal("signals"); });
-    $("aboutBtn").addEventListener("click", function () {
-      openModal("About Gold Scout", '<p>Gold Scout helps prospectors make a shorter, better-informed shortlist before a field day. It brings Queensland imagery, tenure, structure and mineral-occurrence context into one map.</p><ul class="source-list"><li><strong>Official context:</strong> Queensland Government map services</li><li><strong>Modelled layer:</strong> transparent client-side planning signal</li><li><strong>Remember:</strong> map context does not grant permission to enter or prospect</li></ul><p>Always confirm current information in GeoResGlobe and the relevant Queensland rules before you go.</p>');
-    });
-    $("profileBtn").addEventListener("click", function () { showToast("Profile and field kit coming next"); });
-    $("shareBtn").addEventListener("click", shareMap);
-    $("locateBtn").addEventListener("click", function () {
-      if (!map || !navigator.geolocation) { showToast("Location is not available in this browser"); return; }
-      showToast("Requesting your location…");
-      map.locate({ setView: true, maxZoom: 13, enableHighAccuracy: true });
-      map.once("locationfound", function (event) {
-        L.marker(event.latlng, { icon: L.divIcon({ className: "user-pin-icon", html: '<div class="user-marker"></div>', iconSize: [15, 15], iconAnchor: [7, 7] }) }).addTo(map).bindTooltip("Your location").openTooltip();
-        updateCoordinate(event.latlng); showToast("Centered on your location");
-      });
-      map.once("locationerror", function () { showToast("Couldn’t access location — check browser permission"); });
-    });
-    $("resetViewBtn").addEventListener("click", function () { chooseLocation(getLocation(state.areaId)); });
-    $("zoomInBtn").addEventListener("click", function () { if (map) map.zoomIn(); });
-    $("zoomOutBtn").addEventListener("click", function () { if (map) map.zoomOut(); });
-    $("fullscreenBtn").addEventListener("click", function () {
-      var stage = document.querySelector(".map-stage");
-      if (!document.fullscreenElement && stage.requestFullscreen) stage.requestFullscreen();
-      else if (document.exitFullscreen) document.exitFullscreen();
-      setTimeout(function () { if (map) map.invalidateSize(); }, 300);
-    });
-    $("closeInsight").addEventListener("click", function () { $("mapInsight").classList.add("hidden"); });
-    $("legendToggle").addEventListener("click", function () { $("legendItems").classList.toggle("collapsed"); $("legendToggle").textContent = $("legendItems").classList.contains("collapsed") ? "⌃" : "⌄"; });
-    $("modalClose").addEventListener("click", closeModal);
-    $("modalBackdrop").addEventListener("click", function (event) { if (event.target === $("modalBackdrop")) closeModal(); });
-    document.addEventListener("keydown", function (event) {
-      if (event.key === "Escape") { closeModal(); $("mapInsight").classList.remove("hidden"); }
-      if (event.key === "/" && document.activeElement.tagName !== "INPUT") { event.preventDefault(); $("locationSearch").focus(); }
-    });
-
-    ["fault", "drainage", "gold"].forEach(function (key) {
-      var input = $(key === "fault" ? "faultWeight" : key === "drainage" ? "drainageWeight" : "goldWeight");
-      input.addEventListener("input", function () {
-        state.weights[key] = Number(input.value);
-        updateWeightsUI();
-        if (activeTarget) {
-          var updated = getTargets(currentLocation.coords).find(function (item) { return item.id === activeTarget.id; });
-          if (updated) selectTarget(updated);
-        }
-      });
-    });
-    $("runModelBtn").addEventListener("click", runModel);
-
-    var search = $("locationSearch");
-    search.addEventListener("input", function () { renderSearchResults(search.value); });
-    search.addEventListener("focus", function () { renderSearchResults(search.value); });
-    document.addEventListener("click", function (event) {
-      if (!event.target.closest(".search-block")) $("searchResults").hidden = true;
-    });
-    renderSearchResults("");
-    $("searchResults").hidden = true;
-
-    var hash = location.hash.match(/#area=([^&]+)/);
-    if (hash) {
-      var sharedArea = getLocation(decodeURIComponent(hash[1]));
-      if (sharedArea) { state.areaId = sharedArea.id; currentLocation = sharedArea; }
-      history.replaceState(null, "", location.pathname + location.search);
-    }
-    updateLayerCount();
-  }
-
-  function renderSearchResults(query) {
-    var results = $("searchResults");
-    var clean = String(query || "").trim().toLowerCase();
-    var matches = LOCATIONS.filter(function (item) { return !clean || (item.name + " " + item.short).toLowerCase().includes(clean); }).slice(0, 5);
-    results.innerHTML = "";
-    matches.forEach(function (item) {
-      var button = document.createElement("button");
-      button.className = "result-item";
-      button.innerHTML = "<strong>⌖ &nbsp;" + escapeHTML(item.name) + "</strong><small>Queensland · " + escapeHTML(item.meta) + "</small>";
-      button.addEventListener("click", function () { $("locationSearch").value = item.short; results.hidden = true; chooseLocation(item); });
-      results.appendChild(button);
-    });
-    results.hidden = false;
-  }
-
-  // Start after the DOM exists. This file is deliberately safe to load at the end of body too.
-  init();
-})();
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
+  else init();
+}());
