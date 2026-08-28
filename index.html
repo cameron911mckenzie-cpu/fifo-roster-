@@ -1,192 +1,228 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>FIFO Roster Calendar</title>
-<link rel="stylesheet" href="styles.css" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#111612" />
+  <meta name="description" content="Gold Scout — a field planning map for Queensland prospectors." />
+  <title>Gold Scout · Queensland field intelligence</title>
+  <link rel="preconnect" href="https://unpkg.com" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIINfQ3ec7fK1F6W4R5h4hW5E2pY7cD1+6M=" crossorigin="" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-<div class="app">
-
-  <!-- ============ SETTINGS SIDEBAR ============ -->
-  <aside class="sidebar no-print" id="sidebar">
-    <div class="brand">
-      <span class="brand-icon">✈</span>
-      <div>
-        <h1>FIFO Roster</h1>
-        <p>Rolling calendar planner</p>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-lockup">
+        <div class="brand-mark" aria-hidden="true"><span>Au</span></div>
+        <div>
+          <p class="eyebrow">FIELD INTELLIGENCE <span>/</span> QUEENSLAND</p>
+          <h1>Gold Scout</h1>
+        </div>
       </div>
-    </div>
-
-    <div class="panel">
-      <h2>Worker</h2>
-      <label class="field">
-        <span>Name / crew (shows on printout)</span>
-        <input type="text" id="workerName" placeholder="e.g. Cam — B Crew" />
-      </label>
-    </div>
-
-    <div class="panel">
-      <h2>Roster pattern</h2>
-      <label class="field">
-        <span>Preset</span>
-        <select id="preset">
-          <option value="7,7">7 / 7</option>
-          <option value="8,6">8 / 6</option>
-          <option value="14,14">14 / 14</option>
-          <option value="14,7">14 / 7</option>
-          <option value="21,7">21 / 7</option>
-          <option value="2w,2w">2 weeks / 2 weeks</option>
-          <option value="custom">Custom…</option>
-        </select>
-      </label>
-      <div class="field-row">
-        <label class="field">
-          <span>Days on site</span>
-          <input type="number" id="daysOn" min="1" max="90" value="7" />
-        </label>
-        <label class="field">
-          <span>Days at home</span>
-          <input type="number" id="daysOff" min="1" max="90" value="7" />
-        </label>
+      <div class="topbar-center">
+        <div class="sync-pill"><span class="live-dot"></span> QLD layers connected</div>
+        <span class="topbar-note">Built for the next good ground</span>
       </div>
-      <label class="field">
-        <span>First fly-in day (start of a swing)</span>
-        <input type="date" id="startDate" />
-      </label>
-    </div>
-
-    <div class="panel">
-      <h2>Day / night rotation</h2>
-      <label class="field">
-        <span>Shift pattern</span>
-        <select id="rotation">
-          <option value="days">Day shifts only</option>
-          <option value="nights">Night shifts only</option>
-          <option value="split-dn">Days then nights (within each swing)</option>
-          <option value="split-nd">Nights then days (within each swing)</option>
-          <option value="alt">Alternate swings (day swing / night swing)</option>
-        </select>
-      </label>
-      <label class="field" id="splitField" hidden>
-        <span>Shifts before switching over</span>
-        <input type="number" id="splitCount" min="1" max="89" value="4" />
-      </label>
-      <label class="field" id="altField" hidden>
-        <span>First swing is…</span>
-        <select id="altFirst">
-          <option value="day">Day shift swing</option>
-          <option value="night">Night shift swing</option>
-        </select>
-      </label>
-    </div>
-
-    <div class="panel">
-      <h2>Fly days</h2>
-      <label class="field">
-        <span>Fly-out day</span>
-        <select id="flyOutMode">
-          <option value="last">Last rostered day on site</option>
-          <option value="after">Day after last shift (1st R&amp;R day)</option>
-        </select>
-      </label>
-    </div>
-
-    <div class="panel">
-      <h2>Pay days</h2>
-      <label class="field">
-        <span>Pay frequency</span>
-        <select id="payFreq">
-          <option value="none">Don't show pay days</option>
-          <option value="weekly">Weekly</option>
-          <option value="fortnightly" selected>Fortnightly</option>
-          <option value="monthly">Monthly (same date each month)</option>
-        </select>
-      </label>
-      <label class="field" id="payRefField">
-        <span>A known pay day</span>
-        <input type="date" id="payRef" />
-      </label>
-    </div>
-
-    <div class="panel">
-      <h2>Calendar options</h2>
-      <label class="field">
-        <span>Week starts on</span>
-        <select id="weekStart">
-          <option value="1">Monday</option>
-          <option value="0">Sunday</option>
-        </select>
-      </label>
-      <label class="field">
-        <span>Theme</span>
-        <select id="theme">
-          <option value="default">Sky (default)</option>
-          <option value="coal">Coal</option>
-          <option value="gold">Gold</option>
-          <option value="underground">Underground mining</option>
-        </select>
-      </label>
-    </div>
-
-    <div class="panel">
-      <h2>Share my roster</h2>
-      <button class="btn btn-small" id="shareBtn">👨‍👩‍👧 Share my roster with family</button>
-      <button class="btn btn-small" id="copyLinkBtn">🔗 Copy my roster link</button>
-      <button class="btn btn-small" id="icsBtn">📅 Export to phone calendar (.ics)</button>
-      <p class="hint" style="margin-top:8px">This link carries <b>your</b> full roster setup — family who open it see your exact calendar with your fly days and pay days.</p>
-    </div>
-
-    <div class="panel">
-      <h2>Share the app</h2>
-      <button class="btn btn-small" id="shareAppBtn">🧰 Share blank app (template)</button>
-      <button class="btn btn-small" id="copyAppLinkBtn">🔗 Copy app link</button>
-      <p class="hint" style="margin-top:8px">Sends the app only — <b>no</b> roster details. Mates open it fresh and punch in their own swing.</p>
-    </div>
-
-    <button class="btn btn-primary" id="printBtn">🖨 Print this month</button>
-    <button class="btn btn-ghost" id="resetBtn">Reset settings</button>
-    <p class="hint">Settings save automatically in your browser. Tip: use landscape when printing.</p>
-  </aside>
-
-  <!-- ============ CALENDAR ============ -->
-  <main class="main">
-    <header class="cal-header">
-      <div class="month-nav no-print">
-        <button class="nav-btn" id="prevYear" title="Previous year">«</button>
-        <button class="nav-btn" id="prevMonth" title="Previous month">‹</button>
-        <button class="nav-btn today-btn" id="todayBtn">Today</button>
-        <button class="nav-btn" id="nextMonth" title="Next month">›</button>
-        <button class="nav-btn" id="nextYear" title="Next year">»</button>
+      <div class="top-actions">
+        <button class="icon-button" id="locateBtn" title="Use my location" aria-label="Use my location"><span class="icon">⌖</span><span class="button-label">Locate me</span></button>
+        <button class="icon-button" id="shareBtn" title="Copy map link" aria-label="Copy map link"><span class="icon">↗</span><span class="button-label">Share</span></button>
+        <button class="avatar-button" id="profileBtn" title="Profile">JD</button>
       </div>
-      <div class="cal-title">
-        <h2 id="monthTitle">Month</h2>
-        <p id="printSubtitle" class="print-subtitle"></p>
-      </div>
-      <div class="swing-summary" id="swingSummary"></div>
     </header>
 
-    <div class="legend" id="legend">
-      <span class="lg"><i class="sw sw-flyin"></i> Fly in</span>
-      <span class="lg"><i class="sw sw-day"></i> Day shift</span>
-      <span class="lg"><i class="sw sw-night"></i> Night shift</span>
-      <span class="lg"><i class="sw sw-flyout"></i> Fly out</span>
-      <span class="lg"><i class="sw sw-home"></i> Home / R&amp;R</span>
-      <span class="lg"><i class="sw sw-pay"></i> Pay day</span>
+    <div class="workspace">
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-scroll">
+          <section class="search-block">
+            <label class="search-field" for="locationSearch">
+              <span class="search-icon">⌕</span>
+              <input id="locationSearch" type="search" placeholder="Search a town or place" autocomplete="off" />
+              <kbd>/</kbd>
+            </label>
+            <div class="search-results" id="searchResults" hidden></div>
+          </section>
+
+          <div class="sidebar-intro">
+            <div>
+              <span class="section-kicker">ACTIVE AREA</span>
+              <h2 id="areaName">Charters Towers Goldfield</h2>
+              <p id="areaMeta">20.07° S, 146.27° E · 11 km view</p>
+            </div>
+            <button class="round-button" id="resetViewBtn" title="Reset map view">⟳</button>
+          </div>
+
+          <nav class="side-tabs" aria-label="Workspace sections">
+            <button class="side-tab active" data-tab="layers">Layers <span class="tab-count" id="layerCount">3</span></button>
+            <button class="side-tab" data-tab="planner">Scout plan</button>
+            <button class="side-tab" data-tab="saved">Saved <span class="tab-count" id="savedCount">0</span></button>
+          </nav>
+
+          <div class="tab-panel active" id="layersTab">
+            <div class="map-style-block">
+              <div class="block-heading"><span>BASE MAP</span><button class="help-button" title="Map source information" data-help="basemap">?</button></div>
+              <div class="style-switcher" role="group" aria-label="Basemap style">
+                <button class="style-button active" data-style="satellite"><span class="style-thumb satellite-thumb"></span>Satellite</button>
+                <button class="style-button" data-style="topo"><span class="style-thumb topo-thumb"></span>Topo</button>
+                <button class="style-button" data-style="street"><span class="style-thumb street-thumb"></span>Street</button>
+              </div>
+              <p class="source-caption">Latest available Queensland imagery · Department of Resources</p>
+            </div>
+
+            <div class="layer-group">
+              <div class="block-heading"><span>GROUND TRUTH</span><span class="group-line"></span></div>
+              <div class="layer-list">
+                <label class="layer-row">
+                  <span class="layer-swatch lease-swatch"></span>
+                  <span class="layer-copy"><strong>Current mining leases</strong><small>Granted ML boundaries</small></span>
+                  <input class="layer-toggle" type="checkbox" data-layer="leases" checked />
+                  <span class="toggle-ui"></span>
+                  <button class="layer-info" data-info="leases" title="Layer details">i</button>
+                </label>
+                <label class="layer-row">
+                  <span class="layer-swatch permit-swatch"></span>
+                  <span class="layer-copy"><strong>Exploration permits</strong><small>EPM granted areas</small></span>
+                  <input class="layer-toggle" type="checkbox" data-layer="permits" />
+                  <span class="toggle-ui"></span>
+                  <button class="layer-info" data-info="permits" title="Layer details">i</button>
+                </label>
+                <label class="layer-row">
+                  <span class="layer-swatch fault-swatch"></span>
+                  <span class="layer-copy"><strong>Faults &amp; shear zones</strong><small>Detailed structure</small></span>
+                  <input class="layer-toggle" type="checkbox" data-layer="faults" checked />
+                  <span class="toggle-ui"></span>
+                  <button class="layer-info" data-info="faults" title="Layer details">i</button>
+                </label>
+                <label class="layer-row">
+                  <span class="layer-swatch occurrence-swatch"></span>
+                  <span class="layer-copy"><strong>Mineral occurrences</strong><small>Known sites &amp; workings</small></span>
+                  <input class="layer-toggle" type="checkbox" data-layer="occurrences" />
+                  <span class="toggle-ui"></span>
+                  <button class="layer-info" data-info="occurrences" title="Layer details">i</button>
+                </label>
+              </div>
+            </div>
+
+            <div class="layer-group signal-group">
+              <div class="block-heading"><span>SCOUTING SIGNALS</span><span class="beta-tag">BETA</span></div>
+              <div class="layer-list">
+                <label class="layer-row featured-row">
+                  <span class="layer-swatch signal-swatch"></span>
+                  <span class="layer-copy"><strong>Prospecting signal</strong><small>Modelled target zones</small></span>
+                  <input class="layer-toggle" type="checkbox" data-layer="signals" checked />
+                  <span class="toggle-ui"></span>
+                  <button class="layer-info" data-info="signals" title="Layer details">i</button>
+                </label>
+                <label class="layer-row">
+                  <span class="layer-swatch geology-swatch"></span>
+                  <span class="layer-copy"><strong>Host geology</strong><small>State surface geology</small></span>
+                  <input class="layer-toggle" type="checkbox" data-layer="geology" />
+                  <span class="toggle-ui"></span>
+                  <button class="layer-info" data-info="geology" title="Layer details">i</button>
+                </label>
+                <label class="layer-row">
+                  <span class="layer-swatch magnetics-swatch"></span>
+                  <span class="layer-copy"><strong>Magnetic response</strong><small>Regional geophysics image</small></span>
+                  <input class="layer-toggle" type="checkbox" data-layer="geophysics" />
+                  <span class="toggle-ui"></span>
+                  <button class="layer-info" data-info="geophysics" title="Layer details">i</button>
+                </label>
+                <label class="layer-row">
+                  <span class="layer-swatch access-swatch"></span>
+                  <span class="layer-copy"><strong>Roads &amp; access context</strong><small>Reference only</small></span>
+                  <input class="layer-toggle" type="checkbox" data-layer="roads" />
+                  <span class="toggle-ui"></span>
+                  <button class="layer-info" data-info="roads" title="Layer details">i</button>
+                </label>
+              </div>
+              <div class="model-note"><span class="sparkle">✦</span><p><strong>Signal is a filter, not a promise.</strong> Open the Scout plan to tune what matters to you.</p></div>
+            </div>
+
+            <div class="layers-footer">
+              <div class="data-status"><span class="status-check">✓</span><span><strong>Sources online</strong><small>Tenure data updates nightly</small></span></div>
+              <a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noopener" class="external-link">Open GeoResGlobe <span>↗</span></a>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="plannerTab">
+            <div class="plan-header">
+              <span class="section-kicker">TARGET BUILDER</span>
+              <h2>Filter the noise.</h2>
+              <p>Weight the signals you trust, then compare ground before you drive.</p>
+            </div>
+            <div class="plan-card">
+              <div class="plan-card-title"><span class="plan-icon">✦</span><span><strong>Prospecting signal</strong><small>Score composition</small></span><b id="scorePreview">72</b></div>
+              <div class="slider-field"><div><span>Structure proximity</span><b id="faultValue">40%</b></div><input type="range" id="faultWeight" min="0" max="100" value="40" /></div>
+              <div class="slider-field"><div><span>Alluvial / drainage setting</span><b id="drainageValue">35%</b></div><input type="range" id="drainageWeight" min="0" max="100" value="35" /></div>
+              <div class="slider-field"><div><span>Known gold evidence</span><b id="goldValue">25%</b></div><input type="range" id="goldWeight" min="0" max="100" value="25" /></div>
+              <div class="weight-warning" id="weightWarning" hidden>Weights are normalised when you run the model.</div>
+              <button class="primary-button" id="runModelBtn"><span>Run area model</span><span>→</span></button>
+            </div>
+            <div class="explain-card">
+              <div class="block-heading"><span>WHAT THIS USES</span><span class="help-button">?</span></div>
+              <ul class="explain-list">
+                <li><span class="explain-dot gold-dot"></span><span><strong>Structure</strong> mapped faults and shear zones</span></li>
+                <li><span class="explain-dot blue-dot"></span><span><strong>Setting</strong> drainage / low-slope proxy</span></li>
+                <li><span class="explain-dot coral-dot"></span><span><strong>Evidence</strong> mineral occurrences and workings</span></li>
+              </ul>
+              <p class="small-print">This is a transparent planning aid — not a geological prediction or guarantee of gold.</p>
+            </div>
+          </div>
+
+          <div class="tab-panel" id="savedTab">
+            <div class="plan-header">
+              <span class="section-kicker">YOUR PLACES</span>
+              <h2>Saved targets.</h2>
+              <p>Keep a shortlist for the next field run. Click a pin on the map to save it.</p>
+            </div>
+            <div id="savedList" class="saved-list"></div>
+            <div class="empty-saved" id="emptySaved"><div class="empty-icon">☆</div><strong>No saved targets yet</strong><p>Pick a model target or click anywhere on the map to make a field note.</p></div>
+          </div>
+        </div>
+
+        <div class="sidebar-bottom">
+          <div class="legal-strip"><span>ⓘ</span><p>Always verify current tenure, access, fossicking rules and cultural restrictions before entering ground.</p></div>
+          <div class="sidebar-bottom-row"><span>Gold Scout v0.1</span><button id="aboutBtn">About sources</button></div>
+        </div>
+      </aside>
+
+      <main class="map-stage">
+        <div id="map" role="application" aria-label="Queensland prospecting map"></div>
+        <div class="map-topbar">
+          <div class="map-context"><span class="context-dot"></span><div><strong id="mapTitle">Charters Towers Goldfield</strong><span id="mapSubtitle">Model preview · 11 km view</span></div></div>
+          <div class="map-top-actions"><span class="coordinate-readout" id="coordinateReadout">20°04′S 146°16′E</span><button class="map-tool-button" id="fullscreenBtn" title="Toggle full screen">⛶</button></div>
+        </div>
+        <div class="map-zoom-control" aria-label="Map zoom controls"><button id="zoomInBtn" title="Zoom in">+</button><button id="zoomOutBtn" title="Zoom out">−</button></div>
+
+        <div class="map-insight" id="mapInsight">
+          <div class="insight-topline"><span class="mini-label">FIELD SHORTLIST</span><button id="closeInsight" class="close-button" aria-label="Close target brief">×</button></div>
+          <div class="insight-heading"><div><span class="target-number">01</span><div><span class="target-label">MODEL TARGET</span><h2 id="insightTitle">Burdekin drainage edge</h2></div></div><div class="score-badge"><strong id="insightScore">72</strong><span>/100</span></div></div>
+          <p class="insight-description" id="insightDescription">A high-signal starting point where mapped structure meets a broad alluvial corridor.</p>
+          <div class="signal-chips"><span><i class="chip-dot gold-dot"></i>Fault edge</span><span><i class="chip-dot blue-dot"></i>Low slope</span><span><i class="chip-dot coral-dot"></i>Outside shown ML</span></div>
+          <div class="insight-actions"><button class="save-target-button" id="saveTargetBtn"><span>☆</span> Save target</button><button class="detail-button" id="inspectBtn">Inspect</button></div>
+          <div class="insight-foot"><span>Modelled from visible layers</span><button id="howItWorksBtn">How it works ↗</button></div>
+        </div>
+
+        <div class="map-legend" id="mapLegend">
+          <div class="legend-title">MAP KEY <button id="legendToggle" aria-label="Toggle map key">⌄</button></div>
+          <div class="legend-items" id="legendItems"><span><i class="legend-line signal-line"></i> Signal zone</span><span><i class="legend-line fault-line"></i> Fault / shear</span><span><i class="legend-box lease-box"></i> Mining lease</span><span><i class="legend-dot occurrence-dot"></i> Occurrence</span></div>
+        </div>
+        <div class="map-bottom-bar"><span><span class="map-pin-icon">⌖</span> Click the map to inspect a point</span><span class="map-scale">5 km</span></div>
+      </main>
     </div>
+  </div>
 
-    <div class="calendar" id="calendar"></div>
+  <div class="modal-backdrop" id="modalBackdrop" hidden>
+    <section class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <button class="modal-close" id="modalClose" aria-label="Close">×</button>
+      <span class="section-kicker">DATA NOTES</span>
+      <h2 id="modalTitle">About Gold Scout</h2>
+      <div id="modalContent"></div>
+    </section>
+  </div>
+  <div class="toast" id="toast" hidden></div>
 
-    <footer class="cal-footer">
-      <span id="footerPattern"></span>
-      <span class="no-print">Rolling roster — browse any month, past or future.</span>
-    </footer>
-  </main>
-</div>
-
-<div class="toast no-print" id="toast" hidden></div>
-
-<script src="app.js"></script>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+  <script src="app.js"></script>
 </body>
 </html>
