@@ -1,593 +1,545 @@
-/* ============================================================
-   FIFO Roster Calendar — rolling roster engine + month renderer
-   ============================================================ */
+/*
+ * Gold Scout
+ * A deliberately small, dependency-light field planning interface.
+ * Live map layers are supplied by Queensland Government services; the target
+ * signal is a transparent planning model and must not be treated as a find.
+ */
 (function () {
   "use strict";
 
-  var STORAGE_KEY = "fifo-roster-settings-v1";
-  var MS_DAY = 86400000;
+  var STORAGE_KEY = "gold-scout-state-v1";
+  var DEFAULT_AREA = "charters";
+  var LOCATIONS = [
+    { id: "charters", name: "Charters Towers Goldfield", short: "Charters Towers", meta: "20.07° S, 146.27° E", coords: [-20.073, 146.263], zoom: 11 },
+    { id: "clermont", name: "Clermont goldfields", short: "Clermont", meta: "22.83° S, 147.63° E", coords: [-22.825, 147.635], zoom: 11 },
+    { id: "ravenswood", name: "Ravenswood district", short: "Ravenswood", meta: "20.10° S, 146.89° E", coords: [-20.101, 146.891], zoom: 11 },
+    { id: "mount-morgan", name: "Mount Morgan district", short: "Mount Morgan", meta: "23.65° S, 150.39° E", coords: [-23.645, 150.389], zoom: 11 },
+    { id: "gympie", name: "Gympie goldfield", short: "Gympie", meta: "26.19° S, 152.66° E", coords: [-26.189, 152.665], zoom: 11 },
+    { id: "warwick", name: "Southern Downs", short: "Warwick", meta: "28.22° S, 152.03° E", coords: [-28.219, 152.034], zoom: 11 }
+  ];
 
-  // ---------- Helpers ----------
+  var state = loadState();
+  var map = null;
+  var baseLayers = {};
+  var overlayLayers = {};
+  var signalLayer = null;
+  var inspectionMarker = null;
+  var currentLocation = getLocation(state.areaId);
+  var activeTarget = null;
+  var customPoint = null;
+  var toastTimer = null;
+
   function $(id) { return document.getElementById(id); }
-
-  function ymd(d) {
-    return d.getFullYear() + "-" +
-      String(d.getMonth() + 1).padStart(2, "0") + "-" +
-      String(d.getDate()).padStart(2, "0");
-  }
-  function parseYMD(s) {
-    var p = s.split("-");
-    return new Date(+p[0], +p[1] - 1, +p[2]);
-  }
-  // Day count difference ignoring DST (use UTC-noon trick)
-  function dayDiff(a, b) {
-    var ua = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
-    var ub = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
-    return Math.round((ua - ub) / MS_DAY);
-  }
-  function addDays(d, n) {
-    return new Date(d.getFullYear(), d.getMonth(), d.getDate() + n);
-  }
-  function mod(n, m) { return ((n % m) + m) % m; }
-
-  // ---------- Default settings ----------
-  function defaults() {
-    var today = new Date();
-    return {
-      workerName: "",
-      preset: "7,7",
-      daysOn: 7,
-      daysOff: 7,
-      startDate: ymd(today),
-      rotation: "days",
-      splitCount: 4,
-      altFirst: "day",
-      flyOutMode: "last",
-      payFreq: "fortnightly",
-      payRef: ymd(today),
-      weekStart: 1,
-      theme: "default"
-    };
-  }
-
-  var settings = loadSettings();
-  applySharedSettingsFromURL();
-  var view = { year: new Date().getFullYear(), month: new Date().getMonth() };
-
-  function loadSettings() {
+  function clamp(n, min, max) { return Math.max(min, Math.min(max, n)); }
+  function getLocation(id) { return LOCATIONS.find(function (item) { return item.id === id; }) || LOCATIONS[0]; }
+  function loadState() {
+    var fallback = { areaId: DEFAULT_AREA, style: "satellite", saved: [], weights: { fault: 40, drainage: 35, gold: 25 } };
     try {
       var raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        var s = JSON.parse(raw);
-        return Object.assign(defaults(), s);
-      }
-    } catch (e) { /* ignore */ }
-    return defaults();
+      if (!raw) return fallback;
+      var value = JSON.parse(raw);
+      return {
+        areaId: value.areaId || DEFAULT_AREA,
+        style: value.style || "satellite",
+        saved: Array.isArray(value.saved) ? value.saved : [],
+        weights: Object.assign(fallback.weights, value.weights || {})
+      };
+    } catch (error) { return fallback; }
   }
-  function saveSettings() {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
-  }
-
-  // ---------- Share: settings <-> URL ----------
-  var SHARE_KEYS = ["workerName","daysOn","daysOff","startDate","rotation",
-                    "splitCount","altFirst","flyOutMode","payFreq","payRef","weekStart","theme"];
-
-  function buildShareURL() {
-    var payload = {};
-    SHARE_KEYS.forEach(function (k) { payload[k] = settings[k]; });
-    var encoded = btoa(unescape(encodeURIComponent(JSON.stringify(payload))))
-      .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-    return location.origin + location.pathname + "#r=" + encoded;
+  function saveState() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch (error) { /* private mode */ }
   }
 
-  function applySharedSettingsFromURL() {
-    var m = location.hash.match(/[#&]r=([A-Za-z0-9_-]+)/);
-    if (!m) return;
-    try {
-      var b64 = m[1].replace(/-/g, "+").replace(/_/g, "/");
-      while (b64.length % 4) b64 += "=";
-      var payload = JSON.parse(decodeURIComponent(escape(atob(b64))));
-      SHARE_KEYS.forEach(function (k) {
-        if (payload[k] !== undefined && payload[k] !== null) settings[k] = payload[k];
+  function init() {
+    bindStaticUI();
+    renderLocation(currentLocation);
+    renderSaved();
+    updateWeightsUI();
+    if (window.L) initMap();
+    else showMapFallback();
+  }
+
+  function initMap() {
+    map = L.map("map", { zoomControl: false, attributionControl: true, preferCanvas: true }).setView(currentLocation.coords, currentLocation.zoom);
+
+    baseLayers.satellite = L.tileLayer(
+      "https://spatial-img.information.qld.gov.au/arcgis/rest/services/Basemaps/LatestSatelliteWOS_AllUsers/ImageServer/tile/{z}/{y}/{x}",
+      { maxZoom: 18, minZoom: 3, attribution: "Imagery © State of Queensland (Department of Resources)" }
+    );
+    baseLayers.topo = L.tileLayer(
+      "https://gisservices.information.qld.gov.au/arcgis/rest/services/Basemaps/QldMap_Topo/MapServer/tile/{z}/{y}/{x}?blankTile=false&browserCache=Map",
+      { maxZoom: 18, minZoom: 3, attribution: "Topo © State of Queensland (Department of Resources)" }
+    );
+    baseLayers.street = L.tileLayer(
+      "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      { maxZoom: 19, minZoom: 3, subdomains: "abc", attribution: "© OpenStreetMap contributors" }
+    );
+    setBasemap(state.style, false);
+
+    var permitsUrl = "https://spatial-gis.information.qld.gov.au/arcgis/services/Economy/MinesPermitsCurrent/MapServer/WMSServer";
+    var geologyUrl = "https://gisservices.information.qld.gov.au/arcgis/services/GeoscientificInformation/GeologyDetailed/MapServer/WMSServer";
+    var resourcesUrl = "https://spatial-gis.information.qld.gov.au/arcgis/services/GeoscientificInformation/MiningResources/MapServer/WMSServer";
+    var stateGeologyUrl = "https://spatial-gis.information.qld.gov.au/arcgis/services/GeoscientificInformation/GeologyState/MapServer/WMSServer";
+    var geophysicsUrl = "https://spatial-gis.information.qld.gov.au/arcgis/services/GeoscientificInformation/Geophysics/MapServer/WMSServer";
+
+    overlayLayers.leases = L.tileLayer.wms(permitsUrl, {
+      layers: "44", format: "image/png", transparent: true, version: "1.3.0", opacity: .8,
+      attribution: "Tenure © State of Queensland"
+    });
+    overlayLayers.permits = L.tileLayer.wms(permitsUrl, {
+      layers: "3", format: "image/png", transparent: true, version: "1.3.0", opacity: .68,
+      attribution: "Permits © State of Queensland"
+    });
+    overlayLayers.faults = L.tileLayer.wms(geologyUrl, {
+      layers: "4", format: "image/png", transparent: true, version: "1.3.0", opacity: .9,
+      attribution: "Geology © State of Queensland"
+    });
+    overlayLayers.occurrences = L.tileLayer.wms(resourcesUrl, {
+      layers: "17", format: "image/png", transparent: true, version: "1.3.0", opacity: .9,
+      attribution: "Mineral occurrences © State of Queensland"
+    });
+    overlayLayers.geology = L.tileLayer.wms(stateGeologyUrl, {
+      layers: "6", format: "image/png", transparent: true, version: "1.3.0", opacity: .34,
+      attribution: "Geology © State of Queensland"
+    });
+    overlayLayers.geophysics = L.tileLayer.wms(geophysicsUrl, {
+      layers: "20", format: "image/png", transparent: true, version: "1.3.0", opacity: .53,
+      attribution: "Geophysics © State of Queensland"
+    });
+    overlayLayers.roads = L.tileLayer(
+      "https://gisservices4.information.qld.gov.au/arcgis/rest/services/Transportation/RoadsCache/MapServer/tile/{z}/{y}/{x}?blankTile=false&browserCache=Map",
+      { maxZoom: 18, minZoom: 3, opacity: .7, attribution: "Roads © State of Queensland" }
+    );
+
+    Object.keys(overlayLayers).forEach(function (key) {
+      if (key === "leases" || key === "faults") overlayLayers[key].addTo(map);
+    });
+    rebuildSignalLayer();
+    if (document.querySelector('[data-layer="signals"]').checked) signalLayer.addTo(map);
+    selectTarget(getTargets(currentLocation.coords)[0]);
+
+    map.on("click", handleMapClick);
+    map.on("mousemove", function (event) { updateCoordinate(event.latlng); });
+    map.on("zoomend", updateMapMeta);
+    map.on("moveend", updateMapMeta);
+    setTimeout(function () { map.invalidateSize(); }, 100);
+  }
+
+  function showMapFallback() {
+    var mapEl = $("map");
+    mapEl.innerHTML = '<div class="map-fallback"><span>Map tiles need an internet connection</span><strong>QLD field map</strong><small>Layer controls are still available. Reconnect to load live imagery.</small></div>';
+  }
+
+  function setBasemap(style, announce) {
+    state.style = style;
+    document.querySelectorAll(".style-button").forEach(function (button) {
+      button.classList.toggle("active", button.dataset.style === style);
+    });
+    if (!map || !baseLayers[style]) return;
+    Object.keys(baseLayers).forEach(function (key) {
+      if (map.hasLayer(baseLayers[key])) map.removeLayer(baseLayers[key]);
+    });
+    baseLayers[style].addTo(map);
+    if (announce) showToast(style === "satellite" ? "Latest QLD imagery selected" : style.charAt(0).toUpperCase() + style.slice(1) + " basemap selected");
+    saveState();
+  }
+
+  function toggleLayer(key, enabled) {
+    if (!map || !overlayLayers[key] && key !== "signals") return;
+    var layer = key === "signals" ? signalLayer : overlayLayers[key];
+    if (!layer) return;
+    if (enabled) layer.addTo(map);
+    else map.removeLayer(layer);
+    updateLayerCount();
+  }
+
+  function updateLayerCount() {
+    var count = Array.from(document.querySelectorAll(".layer-toggle")).filter(function (input) { return input.checked; }).length;
+    $("layerCount").textContent = count;
+  }
+
+  function rebuildSignalLayer() {
+    if (!window.L) return;
+    var wasVisible = signalLayer && map && map.hasLayer(signalLayer);
+    if (signalLayer && map) map.removeLayer(signalLayer);
+    signalLayer = L.layerGroup();
+    var targets = getTargets(currentLocation.coords);
+
+    // Soft rings create a useful visual hierarchy without pretending to be a heatmap measurement.
+    targets.forEach(function (target, index) {
+      L.circle(target.coords, {
+        radius: target.radius,
+        color: index === 0 ? "#e5ad47" : "#b7834a",
+        weight: 1,
+        opacity: .74,
+        fillColor: index === 0 ? "#e5ad47" : "#bb8a51",
+        fillOpacity: index === 0 ? .13 : .09,
+        dashArray: index === 0 ? "3 7" : "2 8",
+        interactive: false
+      }).addTo(signalLayer);
+      L.circle(target.coords, {
+        radius: target.radius * .42,
+        color: "#f2c15d",
+        weight: 1,
+        opacity: .34,
+        fillColor: "#d18f3f",
+        fillOpacity: .08,
+        interactive: false
+      }).addTo(signalLayer);
+
+      var icon = L.divIcon({ className: "signal-icon", html: '<div class="signal-marker"><span>' + target.number + '</span></div>', iconSize: [24, 24], iconAnchor: [12, 22] });
+      var marker = L.marker(target.coords, { icon: icon, zIndexOffset: 100 + (3 - index) * 10 }).addTo(signalLayer);
+      marker.bindTooltip("Target " + target.number + " · " + target.score + "/100", { direction: "top", offset: [0, -13], className: "signal-tooltip" });
+      marker.on("click", function (event) {
+        if (event.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
+        selectTarget(target);
       });
-      settings.daysOn = Math.max(1, +settings.daysOn || 7);
-      settings.daysOff = Math.max(1, +settings.daysOff || 7);
-      settings.weekStart = +settings.weekStart === 0 ? 0 : 1;
-      saveSettings();
-      // Clean the hash so refreshes don't keep re-importing
-      history.replaceState(null, "", location.pathname + location.search);
-      setTimeout(function () { showToast("Shared roster loaded ✔"); }, 300);
-    } catch (e) { /* bad link — ignore */ }
+    });
+
+    // A restrained, local corridor cue for the model preview.
+    var corridor = targets.map(function (item) { return item.coords; });
+    L.polyline(corridor, { color: "#e5ad47", weight: 2, opacity: .65, dashArray: "2 9", interactive: false }).addTo(signalLayer);
+    if (wasVisible || (map && document.querySelector('[data-layer="signals"]').checked)) signalLayer.addTo(map);
+    if (activeTarget) {
+      var newActive = targets.find(function (target) { return target.id === activeTarget.id; });
+      if (newActive) activeTarget = newActive;
+    }
   }
 
-  // ---------- Toast ----------
-  var toastTimer = null;
-  function showToast(msg) {
-    var t = $("toast");
-    t.textContent = msg;
-    t.hidden = false;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(function () { t.hidden = true; }, 2600);
+  function getTargets(center) {
+    var weights = state.weights;
+    var offsets = [
+      { id: "target-1", number: "01", offset: [0.025, 0.060], title: "Burdekin drainage edge", radius: 2200, values: [76, 75, 61], chips: ["Fault edge", "Low slope", "Outside shown ML"], description: "A high-signal starting point where mapped structure meets a broad alluvial corridor." },
+      { id: "target-2", number: "02", offset: [-0.040, -0.022], title: "Old terrace intersection", radius: 1750, values: [72, 68, 70], chips: ["Structure", "Terrace setting", "Occurrence nearby"], description: "A second-pass target with a stronger historical evidence signal and moderate access context." },
+      { id: "target-3", number: "03", offset: [0.060, -0.078], title: "Western lineament break", radius: 1450, values: [85, 48, 45], chips: ["Strong structure", "Higher ground", "Needs checking"], description: "A structural lead worth checking against terrain, access and current tenure before committing a trip." }
+    ];
+    var total = Math.max(1, Number(weights.fault) + Number(weights.drainage) + Number(weights.gold));
+    return offsets.map(function (item) {
+      var weighted = (item.values[0] * Number(weights.fault) + item.values[1] * Number(weights.drainage) + item.values[2] * Number(weights.gold)) / total;
+      var score = Math.round(weighted);
+      return Object.assign({}, item, {
+        score: clamp(score, 1, 99),
+        coords: [center[0] + item.offset[0], center[1] + item.offset[1]]
+      });
+    });
   }
 
-  // ---------- Share actions ----------
-  function appURL() {
-    return location.origin + location.pathname;
+  function selectTarget(target) {
+    activeTarget = target;
+    customPoint = null;
+    if (inspectionMarker && map) { map.removeLayer(inspectionMarker); inspectionMarker = null; }
+    renderInsight(target);
   }
 
-  function shareRoster() {
-    var url = buildShareURL();
-    var title = "FIFO Roster" + (settings.workerName ? " — " + settings.workerName : "");
-    var text = "My " + settings.daysOn + "/" + settings.daysOff +
-      " FIFO roster — open the link to see my fly days, site days and days home";
+  function handleMapClick(event) {
+    var point = { id: "pin-" + Date.now(), number: "—", title: "Dropped field pin", coords: [event.latlng.lat, event.latlng.lng], score: null, description: "A manual point on the map. Add a note after checking the visible planning layers and access context.", chips: ["Manual point", "Check tenure", "Check access"] };
+    customPoint = point;
+    activeTarget = null;
+    if (inspectionMarker) map.removeLayer(inspectionMarker);
+    inspectionMarker = L.marker(point.coords, { icon: L.divIcon({ className: "user-pin-icon", html: '<div class="user-marker"></div>', iconSize: [15, 15], iconAnchor: [7, 7] }) }).addTo(map);
+    inspectionMarker.bindTooltip("Selected field point", { direction: "top", offset: [0, -8] }).openTooltip();
+    renderInsight(point);
+    updateCoordinate(event.latlng);
+  }
+
+  function renderInsight(item) {
+    var isCustom = !item.score;
+    $("insightTitle").textContent = item.title;
+    $("insightScore").textContent = isCustom ? "—" : item.score;
+    $("insightScore").parentElement.querySelector("span").textContent = isCustom ? "" : "/100";
+    $("insightDescription").textContent = item.description;
+    document.querySelector(".target-number").textContent = isCustom ? "⌖" : item.number;
+    document.querySelector(".target-label").textContent = isCustom ? "FIELD NOTE" : "MODEL TARGET";
+    var chips = $("mapInsight").querySelector(".signal-chips");
+    chips.innerHTML = "";
+    var chipList = Array.isArray(item.chips) ? item.chips : ["Saved target", "Check tenure", "Check access"];
+    chipList.forEach(function (chip, index) {
+      var span = document.createElement("span");
+      span.innerHTML = '<i class="chip-dot ' + (index === 1 ? "blue-dot" : index === 2 ? "coral-dot" : "gold-dot") + '"></i>' + chip;
+      chips.appendChild(span);
+    });
+    var saveButton = $("saveTargetBtn");
+    var alreadySaved = state.saved.some(function (saved) { return saved.id === item.id; });
+    saveButton.classList.toggle("saved", alreadySaved);
+    saveButton.innerHTML = alreadySaved ? "<span>★</span> Saved" : "<span>☆</span> Save target";
+    $("mapInsight").classList.remove("hidden");
+  }
+
+  function getActiveItem() {
+    if (customPoint) return customPoint;
+    if (activeTarget) return activeTarget;
+    var targets = getTargets(currentLocation.coords);
+    return targets[0];
+  }
+
+  function saveActiveTarget() {
+    var item = getActiveItem();
+    var existing = state.saved.findIndex(function (saved) { return saved.id === item.id; });
+    if (existing >= 0) {
+      state.saved.splice(existing, 1);
+      showToast("Removed from saved targets");
+    } else {
+      state.saved.unshift({ id: item.id, title: item.title, score: item.score, coords: item.coords, number: item.number, description: item.description, chips: item.chips, area: currentLocation.short, savedAt: new Date().toISOString() });
+      showToast("Target saved to your shortlist ★");
+    }
+    saveState();
+    renderSaved();
+    renderInsight(item);
+  }
+
+  function renderSaved() {
+    var list = $("savedList");
+    var empty = $("emptySaved");
+    list.innerHTML = "";
+    $("savedCount").textContent = state.saved.length;
+    empty.style.display = state.saved.length ? "none" : "block";
+    state.saved.forEach(function (item) {
+      var row = document.createElement("div");
+      row.className = "saved-item";
+      row.innerHTML = '<span class="saved-pin">⌖</span><span><strong>' + escapeHTML(item.title) + '</strong><small>' + escapeHTML(item.area || "Queensland") + (item.score ? " · " + item.score + "/100" : "") + '</small></span><button class="saved-delete" title="Remove saved target" aria-label="Remove saved target">×</button>';
+      row.addEventListener("click", function (event) {
+        if (event.target.closest(".saved-delete")) return;
+        focusSaved(item);
+      });
+      row.querySelector(".saved-delete").addEventListener("click", function (event) {
+        event.stopPropagation();
+        state.saved = state.saved.filter(function (saved) { return saved.id !== item.id; });
+        saveState(); renderSaved(); showToast("Target removed");
+      });
+      list.appendChild(row);
+    });
+  }
+
+  function focusSaved(item) {
+    var distance = Math.abs(item.coords[0] - currentLocation.coords[0]) + Math.abs(item.coords[1] - currentLocation.coords[1]);
+    if (map && distance > .6) {
+      map.setView(item.coords, 12);
+      currentLocation = { id: "saved", name: item.area || "Saved field point", short: item.area || "Saved point", meta: formatCoordinate(item.coords[0], item.coords[1]), coords: item.coords, zoom: 12 };
+      renderLocation(currentLocation);
+    } else if (map) map.setView(item.coords, Math.max(map.getZoom(), 12));
+    var savedItem = Object.assign({
+      number: "—",
+      description: "A saved field point. Re-check the visible layers, current tenure and access context before planning a visit.",
+      chips: ["Saved target", "Check tenure", "Check access"]
+    }, item);
+    if (item.score) selectTarget(savedItem);
+    else { customPoint = savedItem; activeTarget = null; renderInsight(savedItem); }
+    showToast("Centered on saved target");
+  }
+
+  function renderLocation(location) {
+    $("areaName").textContent = location.name;
+    $("areaMeta").textContent = location.meta + " · " + (map ? viewDistance(map.getZoom()) : "11 km view");
+    $("mapTitle").textContent = location.name;
+    $("mapSubtitle").textContent = "Model preview · " + (map ? viewDistance(map.getZoom()) : "11 km view");
+    $("coordinateReadout").textContent = formatCoordinate(location.coords[0], location.coords[1]);
+  }
+
+  function chooseLocation(location) {
+    currentLocation = location;
+    state.areaId = location.id;
+    customPoint = null;
+    if (map) {
+      map.setView(location.coords, location.zoom);
+      rebuildSignalLayer();
+      var targets = getTargets(location.coords);
+      selectTarget(targets[0]);
+    }
+    renderLocation(location);
+    saveState();
+    showToast("Centered on " + location.short);
+  }
+
+  function updateMapMeta() {
+    if (!map) return;
+    var center = map.getCenter();
+    var label = currentLocation.name;
+    $("areaMeta").textContent = formatCoordinate(center.lat, center.lng) + " · " + viewDistance(map.getZoom());
+    $("mapSubtitle").textContent = "Model preview · " + viewDistance(map.getZoom());
+    $("coordinateReadout").textContent = formatCoordinate(center.lat, center.lng);
+    void label;
+  }
+
+  function viewDistance(zoom) {
+    var km = Math.round(720 / Math.pow(2, Math.max(1, zoom - 5)));
+    return Math.max(1, km) + " km view";
+  }
+
+  function updateCoordinate(latlng) { $("coordinateReadout").textContent = formatCoordinate(latlng.lat, latlng.lng); }
+  function formatCoordinate(lat, lng) {
+    var latHem = lat >= 0 ? "N" : "S";
+    var lngHem = lng >= 0 ? "E" : "W";
+    return Math.abs(lat).toFixed(2) + "° " + latHem + "  " + Math.abs(lng).toFixed(2) + "° " + lngHem;
+  }
+  function escapeHTML(value) { return String(value).replace(/[&<>'"]/g, function (char) { return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[char]; }); }
+
+  function updateWeightsUI() {
+    var weights = state.weights;
+    $("faultWeight").value = weights.fault;
+    $("drainageWeight").value = weights.drainage;
+    $("goldWeight").value = weights.gold;
+    $("faultValue").textContent = weights.fault + "%";
+    $("drainageValue").textContent = weights.drainage + "%";
+    $("goldValue").textContent = weights.gold + "%";
+    var target = activeTarget || getTargets(currentLocation.coords)[0];
+    var total = Number(weights.fault) + Number(weights.drainage) + Number(weights.gold);
+    var score = Math.round((target.values[0] * Number(weights.fault) + target.values[1] * Number(weights.drainage) + target.values[2] * Number(weights.gold)) / Math.max(1, total));
+    $("scorePreview").textContent = clamp(score, 1, 99);
+    $("weightWarning").hidden = total > 0;
+  }
+
+  function runModel() {
+    updateWeightsUI();
+    rebuildSignalLayer();
+    var target = activeTarget || getTargets(currentLocation.coords)[0];
+    if (target) selectTarget(getTargets(currentLocation.coords).find(function (item) { return item.id === target.id; }) || getTargets(currentLocation.coords)[0]);
+    saveState();
+    showToast("Signal model refreshed for this area");
+  }
+
+  function openModal(title, html) {
+    $("modalTitle").textContent = title;
+    $("modalContent").innerHTML = html;
+    $("modalBackdrop").hidden = false;
+  }
+  function closeModal() { $("modalBackdrop").hidden = true; }
+  function showSourceModal(key) {
+    var content = {
+      basemap: ["Basemap sources", '<p>Satellite imagery is the latest publicly available Queensland imagery service. Topo is the Queensland Government topographic cache. Street view uses OpenStreetMap as a lightweight fallback reference.</p><ul class="source-list"><li><strong>Imagery:</strong> Queensland Department of Resources</li><li><strong>Topo:</strong> Queensland Department of Resources</li><li><strong>Street:</strong> OpenStreetMap contributors</li></ul>'],
+      leases: ["Current mining leases", '<p>This layer is the granted <strong>ML permit</strong> sub-layer from Queensland’s current mines and permits service. The service says it is updated nightly. A rendered map layer is not a substitute for checking the live authority record.</p><p><a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noopener">Verify in GeoResGlobe ↗</a></p>'],
+      permits: ["Exploration permits", '<p>Shows granted mineral exploration permit areas (EPM) from the Queensland current permits service. It is included as a context layer so you can spot ground that needs a more careful tenure check.</p><p><a href="https://georesglobe.information.qld.gov.au/" target="_blank" rel="noopener">Open the authority viewer ↗</a></p>'],
+      faults: ["Faults & shear zones", '<p>Detailed mapped faults and shear zones from the Queensland geology service. Structure can help frame a search, but a line on a regional map does not tell you where gold is or whether land is accessible.</p><p><a href="https://www.data.qld.gov.au/dataset/queensland-geology-series" target="_blank" rel="noopener">View Queensland geology data ↗</a></p>'],
+      occurrences: ["Mineral occurrences", '<p>Known mineral resource sites and occurrences from the Geological Survey of Queensland. The layer is deliberately separate from the model so you can inspect the evidence instead of taking a score on trust.</p>'],
+      geology: ["Host geology", '<p>State surface geology gives regional context for rock units and structure. It is not a gold prospectivity map. Use it alongside field observations and the original GSQ data.</p>'],
+      geophysics: ["Magnetic response", '<p>This is the Queensland magnetic image: a regional airborne geophysics layer that can reveal broad changes in rock properties and help frame structural questions.</p><p>It is not a metal detector and should never be interpreted without its scale, survey history and the rest of the geology.</p>'],
+      roads: ["Roads & access context", '<p>Roads are reference-only. Track condition, gates, private property, native title, protected areas and access permissions still need to be checked on the ground and with the relevant authority.</p>'],
+      signals: ["Prospecting signal", '<p>The beta signal combines three visible planning ideas: proximity to mapped structure, a drainage / low-slope setting proxy, and evidence from known mineral occurrences. Weights are adjustable in Scout plan.</p><p><strong>It is not a geological prediction, “magic scan”, or guarantee of gold.</strong> It is designed to reduce random driving and make your assumptions explicit.</p>']
+    }[key] || ["About Gold Scout", "<p>A field planning prototype for Queensland prospectors.</p>"];
+    openModal(content[0], content[1]);
+  }
+
+  function inspectActive() {
+    var item = getActiveItem();
+    var score = item.score ? '<div class="detail-score"><strong>' + item.score + '</strong><span>/100 model signal</span></div>' : "";
+    openModal(item.title, '<p>' + escapeHTML(item.description) + '</p>' + score + '<ul class="source-list"><li><strong>Coordinates:</strong> ' + formatCoordinate(item.coords[0], item.coords[1]) + '</li><li><strong>Next check:</strong> current tenure and access status</li><li><strong>Field note:</strong> compare satellite, topo and what is actually visible on the ground</li></ul><p>Save this point to keep it in your field shortlist.</p>');
+  }
+
+  function shareMap() {
+    var url = location.href.split("#")[0] + "#area=" + encodeURIComponent(currentLocation.id || DEFAULT_AREA);
     if (navigator.share) {
-      navigator.share({ title: title, text: text, url: url }).catch(function () { /* cancelled */ });
-    } else {
-      copyShareLink();
-    }
-  }
-
-  function copyShareLink() {
-    var url = buildShareURL();
-    copyText(url, "My roster link copied ✔");
-  }
-
-  function shareApp() {
-    var url = appURL();
-    var text = "FIFO Roster Calendar — free rolling roster planner. Set your swing (7/7, 8/6, 14/14 or custom), it marks fly days, site days, days home and pay days.";
-    if (navigator.share) {
-      navigator.share({ title: "FIFO Roster Calendar", text: text, url: url }).catch(function () { /* cancelled */ });
-    } else {
-      copyAppLink();
-    }
-  }
-
-  function copyAppLink() {
-    copyText(appURL(), "App link copied ✔ (no roster details)");
-  }
-
-  function copyText(url, okMsg) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(url).then(
-        function () { showToast(okMsg); },
-        function () { fallbackCopy(url); }
-      );
-    } else {
-      fallbackCopy(url);
-    }
+      navigator.share({ title: "Gold Scout field map", text: "A Queensland prospecting map I’m checking out", url: url }).catch(function () {});
+    } else if (navigator.clipboard) {
+      navigator.clipboard.writeText(url).then(function () { showToast("Map link copied"); }, function () { fallbackCopy(url); });
+    } else fallbackCopy(url);
   }
   function fallbackCopy(text) {
-    var ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.position = "fixed";
-    ta.style.opacity = "0";
-    document.body.appendChild(ta);
-    ta.select();
-    try { document.execCommand("copy"); showToast("Share link copied ✔"); }
-    catch (e) { prompt("Copy this link:", text); }
-    document.body.removeChild(ta);
+    var field = document.createElement("textarea");
+    field.value = text; field.style.position = "fixed"; field.style.opacity = "0";
+    document.body.appendChild(field); field.select();
+    try { document.execCommand("copy"); showToast("Map link copied"); } catch (error) { window.prompt("Copy this map link", text); }
+    document.body.removeChild(field);
   }
 
-  // ---------- .ics export (next 12 months) ----------
-  function icsDate(d) {
-    return d.getFullYear() + String(d.getMonth() + 1).padStart(2, "0") + String(d.getDate()).padStart(2, "0");
-  }
-  function exportICS() {
-    var today = new Date();
-    var from = new Date(today.getFullYear(), today.getMonth(), 1);
-    var to = addDays(from, 366);
-    var who = settings.workerName ? settings.workerName + " " : "";
-    var lines = [
-      "BEGIN:VCALENDAR",
-      "VERSION:2.0",
-      "PRODID:-//FIFO Roster Calendar//EN",
-      "CALSCALE:GREGORIAN",
-      "X-WR-CALNAME:" + (who ? who + "FIFO Roster" : "FIFO Roster")
-    ];
-    var stamp = icsDate(today) + "T000000Z";
-    var d = new Date(from);
-    var blockStart = null, blockKey = null, blockLabel = null, uid = 0;
+  function bindStaticUI() {
+    document.querySelectorAll(".style-button").forEach(function (button) {
+      button.addEventListener("click", function () { setBasemap(button.dataset.style, true); });
+    });
+    document.querySelectorAll(".layer-toggle").forEach(function (input) {
+      input.addEventListener("change", function () { toggleLayer(input.dataset.layer, input.checked); saveState(); });
+    });
+    document.querySelectorAll(".layer-info").forEach(function (button) {
+      button.addEventListener("click", function (event) { event.preventDefault(); event.stopPropagation(); showSourceModal(button.dataset.info); });
+    });
+    document.querySelectorAll(".side-tab").forEach(function (button) {
+      button.addEventListener("click", function () {
+        document.querySelectorAll(".side-tab").forEach(function (tab) { tab.classList.remove("active"); });
+        document.querySelectorAll(".tab-panel").forEach(function (panel) { panel.classList.remove("active"); });
+        button.classList.add("active");
+        $(button.dataset.tab + "Tab").classList.add("active");
+      });
+    });
+    $("saveTargetBtn").addEventListener("click", saveActiveTarget);
+    $("inspectBtn").addEventListener("click", inspectActive);
+    $("howItWorksBtn").addEventListener("click", function () { showSourceModal("signals"); });
+    $("aboutBtn").addEventListener("click", function () {
+      openModal("About Gold Scout", '<p>Gold Scout helps prospectors make a shorter, better-informed shortlist before a field day. It brings Queensland imagery, tenure, structure and mineral-occurrence context into one map.</p><ul class="source-list"><li><strong>Official context:</strong> Queensland Government map services</li><li><strong>Modelled layer:</strong> transparent client-side planning signal</li><li><strong>Remember:</strong> map context does not grant permission to enter or prospect</li></ul><p>Always confirm current information in GeoResGlobe and the relevant Queensland rules before you go.</p>');
+    });
+    $("profileBtn").addEventListener("click", function () { showToast("Profile and field kit coming next"); });
+    $("shareBtn").addEventListener("click", shareMap);
+    $("locateBtn").addEventListener("click", function () {
+      if (!map || !navigator.geolocation) { showToast("Location is not available in this browser"); return; }
+      showToast("Requesting your location…");
+      map.locate({ setView: true, maxZoom: 13, enableHighAccuracy: true });
+      map.once("locationfound", function (event) {
+        L.marker(event.latlng, { icon: L.divIcon({ className: "user-pin-icon", html: '<div class="user-marker"></div>', iconSize: [15, 15], iconAnchor: [7, 7] }) }).addTo(map).bindTooltip("Your location").openTooltip();
+        updateCoordinate(event.latlng); showToast("Centered on your location");
+      });
+      map.once("locationerror", function () { showToast("Couldn’t access location — check browser permission"); });
+    });
+    $("resetViewBtn").addEventListener("click", function () { chooseLocation(getLocation(state.areaId)); });
+    $("zoomInBtn").addEventListener("click", function () { if (map) map.zoomIn(); });
+    $("zoomOutBtn").addEventListener("click", function () { if (map) map.zoomOut(); });
+    $("fullscreenBtn").addEventListener("click", function () {
+      var stage = document.querySelector(".map-stage");
+      if (!document.fullscreenElement && stage.requestFullscreen) stage.requestFullscreen();
+      else if (document.exitFullscreen) document.exitFullscreen();
+      setTimeout(function () { if (map) map.invalidateSize(); }, 300);
+    });
+    $("closeInsight").addEventListener("click", function () { $("mapInsight").classList.add("hidden"); });
+    $("legendToggle").addEventListener("click", function () { $("legendItems").classList.toggle("collapsed"); $("legendToggle").textContent = $("legendItems").classList.contains("collapsed") ? "⌃" : "⌄"; });
+    $("modalClose").addEventListener("click", closeModal);
+    $("modalBackdrop").addEventListener("click", function (event) { if (event.target === $("modalBackdrop")) closeModal(); });
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape") { closeModal(); $("mapInsight").classList.remove("hidden"); }
+      if (event.key === "/" && document.activeElement.tagName !== "INPUT") { event.preventDefault(); $("locationSearch").focus(); }
+    });
 
-    function labelFor(st, date) {
-      if (st.key === "flyin") return "🛬 FLY IN — swing starts";
-      if (st.key === "flyout") return "🛫 FLY OUT — heading home";
-      if (st.key === "day") return "☀ Day shift";
-      if (st.key === "night") return "🌙 Night shift";
-      return "🏠 Home / R&R";
+    ["fault", "drainage", "gold"].forEach(function (key) {
+      var input = $(key === "fault" ? "faultWeight" : key === "drainage" ? "drainageWeight" : "goldWeight");
+      input.addEventListener("input", function () {
+        state.weights[key] = Number(input.value);
+        updateWeightsUI();
+        if (activeTarget) {
+          var updated = getTargets(currentLocation.coords).find(function (item) { return item.id === activeTarget.id; });
+          if (updated) selectTarget(updated);
+        }
+      });
+    });
+    $("runModelBtn").addEventListener("click", runModel);
+
+    var search = $("locationSearch");
+    search.addEventListener("input", function () { renderSearchResults(search.value); });
+    search.addEventListener("focus", function () { renderSearchResults(search.value); });
+    document.addEventListener("click", function (event) {
+      if (!event.target.closest(".search-block")) $("searchResults").hidden = true;
+    });
+    renderSearchResults("");
+    $("searchResults").hidden = true;
+
+    var hash = location.hash.match(/#area=([^&]+)/);
+    if (hash) {
+      var sharedArea = getLocation(decodeURIComponent(hash[1]));
+      if (sharedArea) { state.areaId = sharedArea.id; currentLocation = sharedArea; }
+      history.replaceState(null, "", location.pathname + location.search);
     }
-    function flush(endExclusive) {
-      if (!blockStart) return;
-      uid++;
-      lines.push(
-        "BEGIN:VEVENT",
-        "UID:fifo-" + stamp + "-" + uid + "@fifo-roster",
-        "DTSTAMP:" + stamp,
-        "DTSTART;VALUE=DATE:" + icsDate(blockStart),
-        "DTEND;VALUE=DATE:" + icsDate(endExclusive),
-        "SUMMARY:" + who + blockLabel,
-        "TRANSP:TRANSPARENT",
-        "END:VEVENT"
-      );
-    }
-
-    while (d < to) {
-      var st = getStatus(d);
-      var pay = isPayDay(d);
-      var key = st.key;
-      if (key !== blockKey) {
-        flush(d);
-        blockStart = new Date(d);
-        blockKey = key;
-        blockLabel = labelFor(st, d);
-      }
-      if (pay) {
-        uid++;
-        lines.push(
-          "BEGIN:VEVENT",
-          "UID:fifo-pay-" + stamp + "-" + uid + "@fifo-roster",
-          "DTSTAMP:" + stamp,
-          "DTSTART;VALUE=DATE:" + icsDate(d),
-          "DTEND;VALUE=DATE:" + icsDate(addDays(d, 1)),
-          "SUMMARY:💰 PAY DAY",
-          "TRANSP:TRANSPARENT",
-          "END:VEVENT"
-        );
-      }
-      d = addDays(d, 1);
-    }
-    flush(d);
-    lines.push("END:VCALENDAR");
-
-    var blob = new Blob([lines.join("\r\n")], { type: "text/calendar;charset=utf-8" });
-    var a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "fifo-roster.ics";
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(function () {
-      URL.revokeObjectURL(a.href);
-      document.body.removeChild(a);
-    }, 500);
-    showToast("Calendar file downloaded ✔");
+    updateLayerCount();
   }
 
-  // ---------- Theme ----------
-  function applyTheme() {
-    if (settings.theme && settings.theme !== "default") {
-      document.body.setAttribute("data-theme", settings.theme);
-    } else {
-      document.body.removeAttribute("data-theme");
-    }
-  }
-
-  // ---------- Roster engine ----------
-  // Returns status object for a given date, based on rolling cycle.
-  // Statuses: flyin, day, night, flyout, home
-  function getStatus(date) {
-    var on = Math.max(1, settings.daysOn | 0);
-    var off = Math.max(1, settings.daysOff | 0);
-    var cycle = on + off;
-    var start = parseYMD(settings.startDate);
-
-    var diff = dayDiff(date, start);
-    var pos = mod(diff, cycle);           // 0 .. cycle-1, 0 = fly-in day
-    var swingIndex = Math.floor((diff - pos) / cycle); // which swing number (can be negative)
-
-    var onSite = pos < on;
-    var st = { key: "home", label: "Home", sub: "", icon: "" };
-
-    if (onSite) {
-      // Determine shift type for this position within the swing
-      var shift = shiftFor(pos, on, swingIndex);
-      if (shift === "night") st = { key: "night", label: "Night shift", sub: "", icon: "🌙" };
-      else st = { key: "day", label: "Day shift", sub: "", icon: "☀" };
-
-      // Fly day overlays
-      if (pos === 0) {
-        st = { key: "flyin", label: "Fly in", sub: (shift === "night" ? "Night shift" : "Day shift"), icon: "🛬" };
-      }
-      if (settings.flyOutMode === "last" && pos === on - 1) {
-        st = { key: "flyout", label: "Fly out", sub: (shift === "night" ? "Night shift" : "Day shift"), icon: "🛫" };
-      }
-    } else {
-      var offPos = pos - on; // 0 .. off-1
-      if (settings.flyOutMode === "after" && offPos === 0) {
-        st = { key: "flyout", label: "Fly out", sub: "Travel home", icon: "🛫" };
-      } else {
-        var dayOfBreak = offPos + 1;
-        st = { key: "home", label: "Home / R&R", sub: "Day " + dayOfBreak + " of " + off, icon: "🏠" };
-      }
-    }
-
-    // Add "day X of Y" sub for on-site days
-    if (onSite && (st.key === "day" || st.key === "night")) {
-      st.sub = "Day " + (pos + 1) + " of " + on;
-    }
-    if (st.key === "flyin") st.sub += " · Day 1 of " + on;
-    if (st.key === "flyout" && settings.flyOutMode === "last") st.sub += " · Day " + on + " of " + on;
-
-    st.pos = pos;
-    st.swingIndex = swingIndex;
-    st.onSite = onSite;
-    return st;
-  }
-
-  function shiftFor(pos, on, swingIndex) {
-    switch (settings.rotation) {
-      case "nights": return "night";
-      case "split-dn": {
-        var k = clampSplit(on);
-        return pos < k ? "day" : "night";
-      }
-      case "split-nd": {
-        var k2 = clampSplit(on);
-        return pos < k2 ? "night" : "day";
-      }
-      case "alt": {
-        var firstNight = settings.altFirst === "night";
-        var isEven = mod(swingIndex, 2) === 0;
-        var nightSwing = firstNight ? isEven : !isEven;
-        return nightSwing ? "night" : "day";
-      }
-      default: return "day";
-    }
-  }
-  function clampSplit(on) {
-    var k = settings.splitCount | 0;
-    if (k < 1) k = 1;
-    if (k > on - 1) k = Math.max(1, on - 1);
-    return k;
-  }
-
-  // ---------- Pay days ----------
-  function isPayDay(date) {
-    if (settings.payFreq === "none" || !settings.payRef) return false;
-    var ref = parseYMD(settings.payRef);
-    if (settings.payFreq === "weekly") return mod(dayDiff(date, ref), 7) === 0;
-    if (settings.payFreq === "fortnightly") return mod(dayDiff(date, ref), 14) === 0;
-    if (settings.payFreq === "monthly") {
-      var wanted = ref.getDate();
-      var lastOfMonth = new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
-      // If wanted day doesn't exist this month (e.g. 31st), pay on last day
-      var target = Math.min(wanted, lastOfMonth);
-      return date.getDate() === target;
-    }
-    return false;
-  }
-
-  // ---------- Rendering ----------
-  var MONTHS = ["January","February","March","April","May","June",
-                "July","August","September","October","November","December"];
-  var DOW_MON = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
-  var DOW_SUN = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
-
-  function render() {
-    renderCalendar();
-    renderHeader();
-    saveSettings();
-  }
-
-  function renderHeader() {
-    $("monthTitle").textContent = MONTHS[view.month] + " " + view.year;
-
-    var patternTxt = settings.daysOn + " on / " + settings.daysOff + " off";
-    var rotTxt = {
-      "days": "day shifts",
-      "nights": "night shifts",
-      "split-dn": "days → nights",
-      "split-nd": "nights → days",
-      "alt": "alternating day/night swings"
-    }[settings.rotation];
-
-    var sub = patternTxt + " · " + rotTxt;
-    if (settings.workerName) sub = settings.workerName + " · " + sub;
-    $("printSubtitle").textContent = sub;
-    $("footerPattern").textContent =
-      "Roster: " + patternTxt + " · " + rotTxt +
-      " · Swing anchor: " + formatNice(parseYMD(settings.startDate)) +
-      (settings.payFreq !== "none" ? " · Pay: " + settings.payFreq : "");
-
-    // Swing summary: next fly-in and fly-out from today
-    var today = new Date();
-    var nextFlyIn = findNext(today, function (d) { return getStatus(d).key === "flyin"; });
-    var nextFlyOut = findNext(today, function (d) { return getStatus(d).key === "flyout"; });
-    var todaySt = getStatus(today);
-    var html = "Today: <b>" + todaySt.label + "</b>";
-    if (nextFlyIn) html += "<br>Next fly-in: <b>" + formatNice(nextFlyIn) + "</b>";
-    if (nextFlyOut) html += "<br>Next fly-out: <b>" + formatNice(nextFlyOut) + "</b>";
-    $("swingSummary").innerHTML = html;
-  }
-
-  function findNext(from, pred) {
-    for (var i = 1; i <= 120; i++) {
-      var d = addDays(from, i);
-      if (pred(d)) return d;
-    }
-    return null;
-  }
-
-  function formatNice(d) {
-    return d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
-  }
-
-  function renderCalendar() {
-    var cal = $("calendar");
-    cal.innerHTML = "";
-
-    var weekStart = +settings.weekStart; // 1 = Mon, 0 = Sun
-    var dows = weekStart === 1 ? DOW_MON : DOW_SUN;
-    dows.forEach(function (name) {
-      var el = document.createElement("div");
-      el.className = "dow";
-      el.textContent = name;
-      cal.appendChild(el);
+  function renderSearchResults(query) {
+    var results = $("searchResults");
+    var clean = String(query || "").trim().toLowerCase();
+    var matches = LOCATIONS.filter(function (item) { return !clean || (item.name + " " + item.short).toLowerCase().includes(clean); }).slice(0, 5);
+    results.innerHTML = "";
+    matches.forEach(function (item) {
+      var button = document.createElement("button");
+      button.className = "result-item";
+      button.innerHTML = "<strong>⌖ &nbsp;" + escapeHTML(item.name) + "</strong><small>Queensland · " + escapeHTML(item.meta) + "</small>";
+      button.addEventListener("click", function () { $("locationSearch").value = item.short; results.hidden = true; chooseLocation(item); });
+      results.appendChild(button);
     });
-
-    var first = new Date(view.year, view.month, 1);
-    var lead = mod(first.getDay() - weekStart, 7);
-    var gridStart = addDays(first, -lead);
-    var daysInMonth = new Date(view.year, view.month + 1, 0).getDate();
-    var totalCells = Math.ceil((lead + daysInMonth) / 7) * 7;
-
-    var todayStr = ymd(new Date());
-
-    for (var i = 0; i < totalCells; i++) {
-      var d = addDays(gridStart, i);
-      var st = getStatus(d);
-      var cell = document.createElement("div");
-      var cls = "cell st-" + st.key;
-      if (d.getMonth() !== view.month) cls += " other-month";
-      if (ymd(d) === todayStr) cls += " today";
-      if (isPayDay(d)) cls += " payday";
-      cell.className = cls;
-
-      var dateRow = document.createElement("div");
-      dateRow.className = "date-row";
-      var num = document.createElement("span");
-      num.className = "date-num";
-      num.textContent = d.getDate();
-      var ic = document.createElement("span");
-      ic.className = "icon";
-      ic.textContent = st.icon;
-      dateRow.appendChild(num);
-      dateRow.appendChild(ic);
-      cell.appendChild(dateRow);
-
-      var tag = document.createElement("span");
-      tag.className = "tag";
-      tag.textContent = st.label;
-      cell.appendChild(tag);
-
-      if (st.sub) {
-        var sub = document.createElement("div");
-        sub.className = "sub";
-        sub.textContent = st.sub;
-        cell.appendChild(sub);
-      }
-
-      cal.appendChild(cell);
-    }
+    results.hidden = false;
   }
 
-  // ---------- Wire up controls ----------
-  function bindSettingsToUI() {
-    $("workerName").value = settings.workerName;
-    $("preset").value = presetValue();
-    $("daysOn").value = settings.daysOn;
-    $("daysOff").value = settings.daysOff;
-    $("startDate").value = settings.startDate;
-    $("rotation").value = settings.rotation;
-    $("splitCount").value = settings.splitCount;
-    $("altFirst").value = settings.altFirst;
-    $("flyOutMode").value = settings.flyOutMode;
-    $("payFreq").value = settings.payFreq;
-    $("payRef").value = settings.payRef;
-    $("weekStart").value = String(settings.weekStart);
-    $("theme").value = settings.theme || "default";
-    applyTheme();
-    updateConditionalFields();
-  }
-
-  function presetValue() {
-    var map = { "7,7": "7,7", "8,6": "8,6", "14,14": "14,14", "14,7": "14,7", "21,7": "21,7" };
-    var key = settings.daysOn + "," + settings.daysOff;
-    if (key === "14,14") return "14,14";
-    return map[key] || "custom";
-  }
-
-  function updateConditionalFields() {
-    var r = settings.rotation;
-    $("splitField").hidden = !(r === "split-dn" || r === "split-nd");
-    $("altField").hidden = r !== "alt";
-    $("payRefField").hidden = settings.payFreq === "none";
-  }
-
-  function onPresetChange() {
-    var v = $("preset").value;
-    if (v === "custom") return;
-    var parts = v === "2w,2w" ? [14, 14] : v.split(",").map(Number);
-    settings.daysOn = parts[0];
-    settings.daysOff = parts[1];
-    $("daysOn").value = parts[0];
-    $("daysOff").value = parts[1];
-    render();
-  }
-
-  function attach() {
-    $("workerName").addEventListener("input", function () { settings.workerName = this.value; render(); });
-    $("preset").addEventListener("change", onPresetChange);
-    $("daysOn").addEventListener("change", function () {
-      settings.daysOn = Math.max(1, +this.value || 1); this.value = settings.daysOn;
-      $("preset").value = presetValue(); render();
-    });
-    $("daysOff").addEventListener("change", function () {
-      settings.daysOff = Math.max(1, +this.value || 1); this.value = settings.daysOff;
-      $("preset").value = presetValue(); render();
-    });
-    $("startDate").addEventListener("change", function () {
-      if (this.value) { settings.startDate = this.value; render(); }
-    });
-    $("rotation").addEventListener("change", function () {
-      settings.rotation = this.value; updateConditionalFields(); render();
-    });
-    $("splitCount").addEventListener("change", function () {
-      settings.splitCount = Math.max(1, +this.value || 1); this.value = settings.splitCount; render();
-    });
-    $("altFirst").addEventListener("change", function () { settings.altFirst = this.value; render(); });
-    $("flyOutMode").addEventListener("change", function () { settings.flyOutMode = this.value; render(); });
-    $("payFreq").addEventListener("change", function () {
-      settings.payFreq = this.value; updateConditionalFields(); render();
-    });
-    $("payRef").addEventListener("change", function () {
-      if (this.value) { settings.payRef = this.value; render(); }
-    });
-    $("weekStart").addEventListener("change", function () { settings.weekStart = +this.value; render(); });
-    $("theme").addEventListener("change", function () {
-      settings.theme = this.value; applyTheme(); render();
-    });
-
-    $("shareBtn").addEventListener("click", shareRoster);
-    $("copyLinkBtn").addEventListener("click", copyShareLink);
-    $("icsBtn").addEventListener("click", exportICS);
-    $("shareAppBtn").addEventListener("click", shareApp);
-    $("copyAppLinkBtn").addEventListener("click", copyAppLink);
-
-    $("prevMonth").addEventListener("click", function () { shiftMonth(-1); });
-    $("nextMonth").addEventListener("click", function () { shiftMonth(1); });
-    $("prevYear").addEventListener("click", function () { shiftMonth(-12); });
-    $("nextYear").addEventListener("click", function () { shiftMonth(12); });
-    $("todayBtn").addEventListener("click", function () {
-      var now = new Date();
-      view.year = now.getFullYear(); view.month = now.getMonth();
-      render();
-    });
-
-    $("printBtn").addEventListener("click", function () { window.print(); });
-    $("resetBtn").addEventListener("click", function () {
-      if (confirm("Reset all roster settings to defaults?")) {
-        settings = defaults();
-        bindSettingsToUI();
-        render();
-      }
-    });
-
-    // Keyboard navigation
-    document.addEventListener("keydown", function (e) {
-      if (e.target.tagName === "INPUT" || e.target.tagName === "SELECT") return;
-      if (e.key === "ArrowLeft") shiftMonth(-1);
-      if (e.key === "ArrowRight") shiftMonth(1);
-    });
-  }
-
-  function shiftMonth(n) {
-    var d = new Date(view.year, view.month + n, 1);
-    view.year = d.getFullYear();
-    view.month = d.getMonth();
-    render();
-  }
-
-  // ---------- Init ----------
-  bindSettingsToUI();
-  attach();
-  render();
+  // Start after the DOM exists. This file is deliberately safe to load at the end of body too.
+  init();
 })();
